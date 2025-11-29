@@ -360,7 +360,7 @@ namespace pipeann {
       exit(-1);
     }
 
-    static std::string get_name() {
+    std::string get_name() {
       return "RaBitQNeighbor";
     }
     // rev_id_map: new_id -> old_id.

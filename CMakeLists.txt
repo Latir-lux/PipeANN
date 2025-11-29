@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.0)
 project(pipeann)
 
-set(CMAKE_STANDARD 17)
+set(CMAKE_CXX_STANDARD 17)  # 正确：设置C++标准为17
+set(CMAKE_CXX_STANDARD_REQUIRED ON)  # 要求强制支持C++17
+set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(USE_AIO "Use AIO instead of liburing" OFF)
 

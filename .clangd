@@ -1,2 +1,7 @@
 InlayHints:
   Enabled: No
+CompileFlags:
+  Add: [-std=c++17,
+        "-I/opt/intel/oneapi/mkl/2025.1/include"]
+Diagnostics:
+  Suppress: builtin_definition

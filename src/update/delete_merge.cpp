@@ -21,6 +21,16 @@
 #include <sys/syscall.h>
 #include "linux_aligned_file_reader.h"
 
+
+// 
+// 
+/* 实现SSDIndex的删除合并流程 包括已删除节点的索引重新整理 移除已删除节点 生成新索引
+   主要有以下几个部分：
+   当 DynamicSSDIndex 中积累了许多 lazy deletion 标记时
+   需要调用 merge_deletes
+   根据删除列表重新生成新的磁盘索引文件（disk.index），并重新编号节点
+   同时构建新的邻居表数据（neighbor list）、标签文件、metadata、PQ压缩向量等
+*/
 namespace pipeann {
 #define SECTORS_PER_MERGE 65536
   template<typename T, typename TagT>
@@ -34,20 +44,23 @@ namespace pipeann {
 
     void *ctx = reader->get_ctx();
 
+    // Step 0 准备输出文件 等待后台IO 初始化结构
     while (!bg_tasks.empty()) {
       sleep(5);  // simple way to wait for background IO thread.
     }
     std::string disk_index_out = out_path_prefix + "_disk.index";
     // Note that the index is immutable currently.
-    // Step 1: populate neighborhoods, allocate IDs.
+    // Step 1 扫描所有节点 构建新的ID映射 手机被删节点邻居
     libcuckoo::cuckoohash_map<uint32_t, uint32_t> id_map, rev_id_map;           // old_id -> new_id & new_id -> old_id
     libcuckoo::cuckoohash_map<uint32_t, std::vector<uint32_t>> deleted_nhoods;  // id -> nhood
-    std::atomic<uint64_t> new_npoints = 0;
+    std::atomic<uint64_t> new_npoints = 0;  // 删除后节点ID初始化
     Timer delete_timer;
 
+    // 初始化缓冲区
     char *rbuf = nullptr, *wbuf = nullptr;
     alloc_aligned((void **) &rbuf, SECTORS_PER_MERGE * SECTOR_LEN, SECTOR_LEN);
     alloc_aligned((void **) &wbuf, 2 * SECTORS_PER_MERGE * SECTOR_LEN, SECTOR_LEN);  // sliding window buffer.
+    // 计算sector数量
     uint64_t n_sectors = (cur_loc + nnodes_per_sector - 1) / nnodes_per_sector;
     LOG(INFO) << "Cur loc: " << cur_loc.load() << ", cur ID: " << cur_id << ", n_sectors: " << n_sectors
               << ", nnodes_per_sector: " << nnodes_per_sector;
@@ -55,14 +68,18 @@ namespace pipeann {
     constexpr int SECTORS_PER_POPULATE = 128;             // small to avoid blocking search threads.
     uint32_t populate_nthreads = std::min(nthreads, 4u);  // restrict the flow.
 
+    // 分段读取sector并扫描
     for (uint64_t in_sector = 0; in_sector < n_sectors; in_sector += SECTORS_PER_POPULATE) {
+      // 计算本次循环处理的初始sector和结束sector
       uint64_t st_sector = in_sector, ed_sector = std::min(in_sector + SECTORS_PER_POPULATE, n_sectors);
+      // 计算节点索引范围
       uint64_t loc_st = st_sector * nnodes_per_sector, loc_ed = std::min(cur_loc.load(), ed_sector * nnodes_per_sector);
       uint64_t n_sectors_to_read = ed_sector - st_sector;
       std::vector<IORequest> read_reqs;
       read_reqs.push_back(IORequest(loc_sector_no(loc_st) * SECTOR_LEN, n_sectors_to_read * size_per_io, rbuf, 0, 0));
       reader->read(read_reqs, ctx, false);
 
+      // 并行扫描节点
 #pragma omp parallel for num_threads(populate_nthreads)
       for (uint64_t loc = loc_st; loc < loc_ed; ++loc) {
         // populate nhood.
@@ -72,6 +89,7 @@ namespace pipeann {
         }
 
         uint64_t tag = id2tag(id);
+        // 每个节点 如果未删除 分配新ID
         if (deleted_nodes_set.find(tag) == deleted_nodes_set.end()) {  // 2. not deleted, alloc ID.
           // allocate ID.
           uint64_t new_id = new_npoints.fetch_add(1);
@@ -80,7 +98,7 @@ namespace pipeann {
           continue;
         }
 
-        // 3. deleted, populate nhoods.
+        // 如果节点被删除 保存他的邻居集
         auto page_rbuf = rbuf + (loc / nnodes_per_sector - st_sector) * SECTOR_LEN;
         auto node_rbuf = offset_to_loc(page_rbuf, loc);
         DiskNode<T> node(id, offset_to_node_coords(node_rbuf), offset_to_node_nhood(node_rbuf));
@@ -105,18 +123,26 @@ namespace pipeann {
 
     // Step 2: prune neighbors, populate PQ and tags.
     int fd = open(disk_index_out.c_str(), O_DIRECT | O_LARGEFILE | O_RDWR | O_CREAT, 0755);
+    // 写入缓冲区能容纳的节点总数
     const uint64_t kVecInWBuf = 2 * SECTORS_PER_MERGE * nnodes_per_sector;
     uint64_t wb_id = 0;
     std::atomic<uint64_t> n_used_id = 0;
+    // 用于执行具体写回操作
     auto write_back = [&]() {
-      // write one buffer.
+      // 计算缓冲区的索引 取模实现循环缓冲区
       uint64_t buf_id = (wb_id % kVecInWBuf) / (nnodes_per_sector * SECTORS_PER_MERGE);
+      // 获取缓冲区地址
       auto b = wbuf + buf_id * SECTORS_PER_MERGE * SECTOR_LEN;
+      // vector存放IO请求
       std::vector<IORequest> write_reqs;
+      // 计算本次写入量
       uint64_t id_delta = std::min((uint64_t) SECTORS_PER_MERGE * nnodes_per_sector, n_used_id - wb_id);
+      // 构造IO请求 参数依次是偏移量 写入长度 缓冲区指针 等
       write_reqs.push_back(IORequest(loc_sector_no(wb_id) * SECTOR_LEN,
                                      ROUND_UP(id_delta, nnodes_per_sector) / nnodes_per_sector * size_per_io, b, 0, 0));
+      // 执行写回
       reader->write_fd(fd, write_reqs, ctx);
+      // 更新写回位置
       wb_id += id_delta;
       LOG(INFO) << "Write back " << wb_id << "/" << n_used_id << " IDs.";
     };
@@ -128,6 +154,7 @@ namespace pipeann {
       uint64_t loc_st = st_sector * nnodes_per_sector, loc_ed = std::min(cur_loc.load(), ed_sector * nnodes_per_sector);
       uint64_t n_sectors_to_read = ed_sector - st_sector;
       std::vector<IORequest> read_reqs;
+      // 读取下一块sector
       read_reqs.push_back(IORequest(loc_sector_no(loc_st) * SECTOR_LEN, n_sectors_to_read * size_per_io, rbuf, 0, 0));
       reader->read(read_reqs, ctx, false);  // read in fd
 
@@ -254,6 +281,7 @@ namespace pipeann {
     LOG(INFO) << "Write metadata and PQ finished, totally elapsed " << delete_timer.elapsed() / 1e3 << "ms.";
   }
 
+  // 写入 metadata（节点数、维度、medoid 等）与压缩后的 PQ 矢量、tag 文件
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::write_metadata_and_pq(const std::string &in_path_prefix, const std::string &out_path_prefix,
                                                 const uint64_t &new_npoints, const uint64_t &new_medoid,
@@ -276,6 +304,7 @@ namespace pipeann {
     nbr_handler->save(out_path_prefix.c_str());
   }
 
+  // 合并后重新读取新的磁盘 index，使运行中的 DynamicSSDIndex 使用最新的数据
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::reload(const char *index_prefix, uint32_t num_threads) {
     std::string iprefix = std::string(index_prefix);

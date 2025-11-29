@@ -33,6 +33,9 @@ namespace pipeann {
   // (bin), and initialize max_points
   template<typename T, typename TagT>
 
+  // part1 index 类的构造、初始化、数据结构管理
+
+  // 构造函数 初始化维度、最大点数、图结构、距离函数、锁表
   Index<T, TagT>::Index(Metric m, const size_t dim, const size_t max_points, const bool dynamic_index,
                         const bool save_index_in_one_file, const bool enable_tags)
       : _dist_metric(m), _dim(dim), _max_points(max_points), _save_as_one_file(save_index_in_one_file),
@@ -70,6 +73,7 @@ namespace pipeann {
     _width = 0;
   }
 
+  // 析构函数 释放内存和锁表
   template<typename T, typename TagT>
   Index<T, TagT>::~Index() {
     delete this->_distance;
@@ -77,6 +81,7 @@ namespace pipeann {
     aligned_free(_data);
   }
 
+  // 清空索引数据 包括数据与构建的图
   template<typename T, typename TagT>
   void Index<T, TagT>::clear_index() {
     memset(_data, 0, _aligned_dim * (_max_points + _num_frozen_pts) * sizeof(T));
@@ -91,6 +96,9 @@ namespace pipeann {
     _empty_slots.clear();
   }
 
+  // part2 数据加载/保存
+
+  // 保存标签
   template<typename T, typename TagT>
   uint64_t Index<T, TagT>::save_tags(std::string tags_file, size_t offset, bool frozen) {
     if (!_enable_tags) {
@@ -116,6 +124,7 @@ namespace pipeann {
     return tag_bytes_written;
   }
 
+  // 保存向量数据
   template<typename T, typename TagT>
   uint64_t Index<T, TagT>::save_data(std::string data_file, size_t offset, bool frozen) {
     size_t n = (frozen ? (_nd + _num_frozen_pts) : _nd);
@@ -152,6 +161,7 @@ namespace pipeann {
     return index_size;  // number of bytes written
   }
 
+  // 保存要删除的点
   template<typename T, typename TagT>
   uint64_t Index<T, TagT>::save_delete_list(const std::string &filename, uint64_t file_offset) {
     if (_delete_set.size() == 0) {
@@ -165,6 +175,7 @@ namespace pipeann {
     return save_bin<uint32_t>(filename, delete_list.get(), _delete_set.size(), 1, file_offset);
   }
 
+  // 保存整个index
   template<typename T, typename TagT>
   void Index<T, TagT>::save(const char *filename) {
     // first check if no thread is inserting
@@ -214,6 +225,7 @@ namespace pipeann {
     LOG(INFO) << "Time taken for save: " << timespan.count() << "s.";
   }
 
+  // 读取标签
   template<typename T, typename TagT>
   size_t Index<T, TagT>::load_tags(const std::string tag_filename, size_t offset) {
     if (_enable_tags && !file_exists(tag_filename)) {

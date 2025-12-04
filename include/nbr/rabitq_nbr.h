@@ -9,7 +9,7 @@
 #include "partition.h"
 #include "math_utils.h"
 
-#ifdef USE_AVX512
+#if defined(USE_AVX512) && defined(__AVX512VPOPCNTDQ__)
 #include "rabitq/utils/data_layout.hpp"
 #include "rabitq/utils/defines.hpp"
 #include "rabitq/rotator.hpp"
@@ -350,6 +350,51 @@ namespace pipeann {
     };
   };
 }  // namespace pipeann
+
+#elif defined(USE_AVX512)
+
+namespace pipeann {
+  template<typename T>
+  class RaBitQNeighbor : public AbstractNeighbor<T> {
+  public:
+    RaBitQNeighbor<T>() {
+      LOG(ERROR) << "RaBitQNeighbor requires AVX512VPOPCNTDQ but CPU does not support it.";
+      exit(-1);
+    }
+
+    std::string get_name() {
+      return "RaBitQNeighbor";
+    }
+    // rev_id_map: new_id -> old_id.
+    AbstractNeighbor<T> *shuffle(const libcuckoo::cuckoohash_map<uint32_t, uint32_t> &rev_id_map, uint64_t new_npoints,
+                                 uint32_t nthreads) {
+      return this;
+    }
+    void initialize_query(const T *query, QueryBuffer<T> *query_buf) {
+    }
+    // Compute dists using assymetric distance computation.
+    void compute_dists(QueryBuffer<T> *query_buf, const uint32_t *ids, const uint64_t n_ids) {
+    }
+    // Compute dists using PQ all-to-all.
+    void compute_dists(const uint32_t query_id, const uint32_t *ids, const uint64_t n_ids, float *dists_out,
+                       uint8_t *aligned_scratch) {
+    }
+    // Load the neighbor data (e.g., PQ) from disk.
+    void load(const char *index_prefix) {
+    }
+    // Save the neighbor data (e.g., PQ) to disk.
+    void save(const char *index_prefix) {
+    }
+    // Call load after build to load the neighbors.
+    void build(const std::string &index_prefix, const std::string &data_bin, uint32_t bytes_per_nbr) {
+    }
+    void insert(T *point, uint32_t loc) {
+    }
+
+    uint64_t npoints = 0;
+  };
+}  // namespace pipeann
+
 #else
 namespace pipeann {
   template<typename T>

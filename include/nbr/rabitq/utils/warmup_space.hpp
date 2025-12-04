@@ -5,6 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#if defined(__AVX512VPOPCNTDQ__)
+
 template <uint32_t b_query>
 inline float warmup_ip_x0_q(
     const uint64_t* data,   // pointer to data blocks (each 64 bits)
@@ -96,6 +98,8 @@ inline float warmup_ip_x0_q(
     return (delta * static_cast<float>(ip_scalar)) + (vl * static_cast<float>(ppc_scalar));
 }
 
+#else
+
 template <uint32_t b_query, uint32_t padded_dim>
 inline float warmup_ip_x0_q(
     const uint64_t* data,
@@ -126,3 +130,5 @@ inline float warmup_ip_x0_q(
 
     return (delta * static_cast<float>(ip)) + (vl * static_cast<float>(ppc));
 }
+
+#endif

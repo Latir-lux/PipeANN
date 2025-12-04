@@ -15,7 +15,7 @@ override CFLAGS += -Wno-unused-parameter \
 	-DLIBURING_INTERNAL \
 	$(LIBURING_CFLAGS)
 SO_CFLAGS=-fPIC $(CFLAGS)
-L_CFLAGS=$(CFLAGS)
+L_CFLAGS=-fPIC $(CFLAGS)
 ENABLE_SHARED ?= 1
 
 soname=liburing.so.$(VERSION_MAJOR)

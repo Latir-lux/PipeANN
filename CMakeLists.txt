@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.10)
 project(pipeann)
 
 set(CMAKE_CXX_STANDARD 17)  # 正确：设置C++标准为17
@@ -14,6 +14,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include_directories(
 	${PROJECT_SOURCE_DIR}/include 
 	${PROJECT_SOURCE_DIR}/include/tsl/include 
+	/home/xiaoxuanx/Environment/eigen/include
 )
 
 add_compile_options(
@@ -63,6 +64,7 @@ endif()
 # Use tcmalloc, as jemalloc does not support python (static TLS block).
 link_libraries(
 	tcmalloc
+	stdc++fs
 )
 # add_compile_options(-fsanitize=address,undefined -lasan -lubsan)
 # add_link_options(-fsanitize=address,undefined)
@@ -114,6 +116,7 @@ else()
     message(FATAL_ERROR "No OpenMP support")
 endif()
 
+link_libraries(stdc++fs)
 	
 find_package(BLAS)
 if(BLAS_FOUND)

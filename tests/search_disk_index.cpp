@@ -12,6 +12,7 @@
 #include "utils/timer.h"
 #include "utils.h"
 #include "aux_utils.h"
+#include "access_tracer.h"
 
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -19,6 +20,13 @@
 #include "linux_aligned_file_reader.h"
 
 #define WARMUP false
+
+// 全局追踪器
+static pipeann::AccessTracer g_tracer;
+static bool g_trace_enabled = false;
+static std::string g_trace_output_dir = "./draw";
+static float g_fragmentation_ratio = 0.0f;
+static uint32_t g_fragmentation_seed = 42;
 
 void print_stats(std::string category, std::vector<float> percentiles, std::vector<float> results) {
   std::cout << std::setw(20) << category << ": " << std::flush;
@@ -112,6 +120,12 @@ int search_disk_index(int argc, char **argv) {
     return res;
   }
 
+  // 应用碎片化模拟（如果启用）
+  if (g_fragmentation_ratio > 0.0f) {
+    LOG(INFO) << "Applying fragmentation simulation...";
+    _pFlashIndex->apply_fragmentation(g_fragmentation_ratio, g_fragmentation_seed);
+  }
+
   if (mem_L != 0) {
     auto mem_index_path = index_prefix_path + "_mem.index";
     LOG(INFO) << "Load memory index " << mem_index_path << " " << query_dim;
@@ -139,10 +153,18 @@ int search_disk_index(int argc, char **argv) {
     if (search_mode == SearchMode::PIPE_SEARCH) {
 #pragma omp parallel for schedule(dynamic, 1)
       for (int64_t i = 0; i < (int64_t) query_num; i++) {
+        // 为每个查询创建追踪对象（如果启用追踪）
+        pipeann::QueryTrace *trace = nullptr;
+        if (g_trace_enabled) {
+          #pragma omp critical
+          {
+            trace = g_tracer.new_trace(static_cast<uint32_t>(i));
+          }
+        }
         _pFlashIndex->pipe_search(query + (i * query_dim), (uint64_t) recall_at, mem_L, (uint64_t) L,
                                   query_result_tags_32.data() + (i * recall_at),
                                   query_result_dists[test_id].data() + (i * recall_at), (uint64_t) beamwidth,
-                                  stats + i);
+                                  stats + i, trace);
       }
     } else if (search_mode == SearchMode::PAGE_SEARCH) {
 #pragma omp parallel for schedule(dynamic, 1)
@@ -249,7 +271,45 @@ int search_disk_index(int argc, char **argv) {
   for (uint32_t test_id = 0; test_id < Lvec.size(); test_id++) {
     run_tests(test_id, true);
   }
+  
+  // 保存追踪结果
+  if (g_trace_enabled) {
+    LOG(INFO) << "Saving trace results to " << g_trace_output_dir;
+    std::string suffix = g_fragmentation_ratio > 0 ? 
+                        "_frag" + std::to_string(static_cast<int>(g_fragmentation_ratio * 100)) : "_static";
+    g_tracer.save_to_jsonl(g_trace_output_dir + "/trace" + suffix + ".jsonl");
+    g_tracer.save_to_csv(g_trace_output_dir + "/trace_summary" + suffix + ".csv");
+    g_tracer.save_neighbor_details(g_trace_output_dir + "/neighbor_details" + suffix + ".csv");
+    g_tracer.save_page_access_sequence(g_trace_output_dir + "/page_access" + suffix + ".csv");
+    LOG(INFO) << "Trace results saved. Total queries traced: " << g_tracer.size();
+  }
+  
   return 0;
+}
+
+void parse_trace_args(int argc, char **argv, int& next_index) {
+  // 解析可选的追踪参数
+  // 格式: --trace [--trace-output <dir>] [--fragmentation <ratio>] [--frag-seed <seed>]
+  for (int i = next_index; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "--trace") {
+      g_trace_enabled = true;
+      LOG(INFO) << "Trace enabled";
+    } else if (arg == "--trace-output" && i + 1 < argc) {
+      g_trace_output_dir = argv[++i];
+      LOG(INFO) << "Trace output dir: " << g_trace_output_dir;
+    } else if (arg == "--fragmentation" && i + 1 < argc) {
+      g_fragmentation_ratio = std::stof(argv[++i]);
+      LOG(INFO) << "Fragmentation ratio: " << g_fragmentation_ratio;
+    } else if (arg == "--frag-seed" && i + 1 < argc) {
+      g_fragmentation_seed = std::stoi(argv[++i]);
+      LOG(INFO) << "Fragmentation seed: " << g_fragmentation_seed;
+    }
+  }
+  
+  if (g_trace_enabled) {
+    g_tracer = pipeann::AccessTracer(g_trace_output_dir, true);
+  }
 }
 
 int main(int argc, char **argv) {
@@ -262,9 +322,25 @@ int main(int argc, char **argv) {
                  " <K> <similarity (cosine/l2)> <nbr_type (pq/rabitq)>"
                  " <search_mode(0 for beam search / 1 for page search / 2 for pipe search)> <mem_L (0 means not "
                  "using mem index)> <L1> [L2] etc."
+                 "\n\nOptional trace arguments (after L values):"
+                 "\n  --trace                Enable access tracing"
+                 "\n  --trace-output <dir>   Output directory for trace files (default: ./draw)"
+                 "\n  --fragmentation <ratio> Apply fragmentation simulation (0.0-1.0)"
+                 "\n  --frag-seed <seed>     Random seed for fragmentation (default: 42)"
               << std::endl;
     exit(-1);
   }
+  
+  // 解析追踪相关参数
+  int trace_arg_start = 12;  // L 值之后的参数
+  for (int i = 12; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg[0] == '-') {
+      trace_arg_start = i;
+      break;
+    }
+  }
+  parse_trace_args(argc, argv, trace_arg_start);
 
   if (std::string(argv[1]) == std::string("float"))
     search_disk_index<float>(argc, argv);

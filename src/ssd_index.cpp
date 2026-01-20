@@ -2,6 +2,7 @@
 #include "ssd_index.h"
 #include <malloc.h>
 #include <filesystem>
+#include <random>
 
 #include <omp.h>
 #include <cmath>
@@ -316,6 +317,106 @@ namespace pipeann {
 #endif
     }
     LOG(INFO) << "Page layout loaded.";
+  }
+
+  // ==================== 碎片化模拟实现 ====================
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::apply_fragmentation(float ratio, uint32_t seed) {
+    if (ratio <= 0.0f || ratio > 1.0f) {
+      LOG(INFO) << "Invalid fragmentation ratio: " << ratio << ". Must be in (0, 1].";
+      return;
+    }
+    
+    LOG(INFO) << "Applying fragmentation with ratio: " << ratio << ", seed: " << seed;
+    
+    // 保存原始映射用于恢复
+    if (!fragmentation_enabled_) {
+      original_id2loc_ = id2loc_;
+      original_loc2id_ = loc2id_;
+    }
+    
+    // 计算需要打乱的节点数量
+    uint64_t n_to_shuffle = static_cast<uint64_t>(num_points * ratio);
+    if (n_to_shuffle < 2) {
+      LOG(INFO) << "Too few nodes to shuffle.";
+      return;
+    }
+    
+    // 创建随机数生成器
+    std::mt19937 rng(seed);
+    
+    // 创建节点 ID 列表并随机选择要打乱的节点
+    std::vector<uint32_t> node_ids(num_points);
+    for (uint32_t i = 0; i < num_points; ++i) {
+      node_ids[i] = i;
+    }
+    
+    // Fisher-Yates shuffle 选择前 n_to_shuffle 个节点
+    for (uint64_t i = 0; i < n_to_shuffle; ++i) {
+      std::uniform_int_distribution<uint64_t> dist(i, num_points - 1);
+      uint64_t j = dist(rng);
+      std::swap(node_ids[i], node_ids[j]);
+    }
+    
+    // 获取选中节点的当前位置
+    std::vector<uint32_t> selected_ids(node_ids.begin(), node_ids.begin() + n_to_shuffle);
+    std::vector<uint32_t> selected_locs(n_to_shuffle);
+    for (uint64_t i = 0; i < n_to_shuffle; ++i) {
+      selected_locs[i] = id2loc_[selected_ids[i]];
+    }
+    
+    // 打乱位置
+    std::vector<uint32_t> shuffled_locs = selected_locs;
+    for (uint64_t i = n_to_shuffle - 1; i > 0; --i) {
+      std::uniform_int_distribution<uint64_t> dist(0, i);
+      uint64_t j = dist(rng);
+      std::swap(shuffled_locs[i], shuffled_locs[j]);
+    }
+    
+    // 应用新的映射
+    for (uint64_t i = 0; i < n_to_shuffle; ++i) {
+      uint32_t id = selected_ids[i];
+      uint32_t new_loc = shuffled_locs[i];
+      
+      // 更新 id2loc
+      id2loc_[id] = new_loc;
+      // 更新 loc2id
+      loc2id_[new_loc] = id;
+    }
+    
+    fragmentation_enabled_ = true;
+    fragmentation_ratio_ = ratio;
+    
+    LOG(INFO) << "Fragmentation applied: " << n_to_shuffle << " nodes shuffled.";
+    
+    // 验证一致性
+    verify_id2loc();
+  }
+  
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::reset_fragmentation() {
+    if (!fragmentation_enabled_) {
+      LOG(INFO) << "Fragmentation not enabled, nothing to reset.";
+      return;
+    }
+    
+    LOG(INFO) << "Resetting fragmentation...";
+    
+    // 恢复原始映射
+    id2loc_ = original_id2loc_;
+    loc2id_ = original_loc2id_;
+    
+    fragmentation_enabled_ = false;
+    fragmentation_ratio_ = 0.0f;
+    
+    // 清空保存的原始映射
+    original_id2loc_.clear();
+    original_loc2id_.clear();
+    
+    LOG(INFO) << "Fragmentation reset complete.";
+    
+    // 验证一致性
+    verify_id2loc();
   }
 
   template class SSDIndex<float>;

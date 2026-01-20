@@ -15,6 +15,7 @@
 #include "utils.h"
 #include "neighbor.h"
 #include "index.h"
+#include "access_tracer.h"
 
 #define MAX_N_CMPS 16384
 #define MAX_N_EDGES 1024
@@ -181,7 +182,8 @@ namespace pipeann {
                        TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr);
 
     size_t pipe_search(const T *query, const uint64_t k_search, const uint32_t mem_L, const uint64_t l_search,
-                       TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr);
+                       TagT *res_tags, float *res_dists, const uint64_t beam_width, QueryStats *stats = nullptr,
+                       QueryTrace *trace = nullptr);
 
     // deflates `vec` into PQ ids
     std::vector<uint8_t> deflate_vector(const T *vec);
@@ -651,6 +653,36 @@ namespace pipeann {
                                std::vector<TagT> *new_tags = nullptr);
     void copy_index(const std::string &prefix_in, const std::string &prefix_out);
 
+    // ==================== 碎片化模拟相关 ====================
+    /**
+     * @brief 应用碎片化模拟，随机打乱部分节点的逻辑-物理映射
+     * @param ratio 打乱比例 (0.0 - 1.0)，例如 0.5 表示打乱 50% 的节点
+     * @param seed 随机种子，用于可重复的实验
+     */
+    void apply_fragmentation(float ratio, uint32_t seed = 42);
+    
+    /**
+     * @brief 重置碎片化，恢复原始映射
+     */
+    void reset_fragmentation();
+    
+    /**
+     * @brief 检查是否启用了碎片化模拟
+     */
+    bool is_fragmentation_enabled() const { return fragmentation_enabled_; }
+    
+    /**
+     * @brief 获取碎片化比例
+     */
+    float get_fragmentation_ratio() const { return fragmentation_ratio_; }
+
+   private:
+    // 碎片化模拟相关成员
+    bool fragmentation_enabled_ = false;
+    float fragmentation_ratio_ = 0.0f;
+    std::vector<uint32_t> original_id2loc_;  // 保存原始映射用于恢复
+    std::vector<uint32_t> original_loc2id_;
+    
    private:
     // Are we dealing with normalized data? This will be true
     // if distance == COSINE and datatype == float. Required

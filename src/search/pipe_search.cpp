@@ -2,6 +2,7 @@
 #include "utils/libcuckoo/cuckoohash_map.hh"
 #include "neighbor.h"
 #include "ssd_index.h"
+#include "access_tracer.h"
 #include <malloc.h>
 #include <algorithm>
 #ifndef USE_AIO
@@ -42,7 +43,7 @@ namespace pipeann {
   template<typename T, typename TagT>
   size_t SSDIndex<T, TagT>::pipe_search(const T *query1, const uint64_t k_search, const uint32_t mem_L,
                                         const uint64_t l_search, TagT *res_tags, float *distances,
-                                        const uint64_t beam_width, QueryStats *stats) {
+                                        const uint64_t beam_width, QueryStats *stats, QueryTrace *trace) {
     QueryBuffer<T> *query_buf = pop_query_buf(query1);
 #ifdef USE_AIO
     void *ctx = reader->get_ctx();
@@ -90,16 +91,71 @@ namespace pipeann {
       return cur_expanded_dist;
     };
 
+    // Trace initialization - 必须在 compute_and_push_nbrs 之前定义
+    uint32_t trace_step_id = 0;
+    AccessStep *current_step = nullptr;
+    auto trace_start_time = std::chrono::high_resolution_clock::now();
+    
+    auto start_new_trace_step = [&](uint32_t pivot_id) {
+      if (trace != nullptr) {
+        trace->steps.emplace_back();
+        current_step = &trace->steps.back();
+        current_step->step_id = trace_step_id++;
+        current_step->pivot_node_id = pivot_id;
+        current_step->pivot_page_id = id2page(pivot_id);
+      }
+    };
+    
+    auto record_io_request = [&](uint32_t node_id) {
+      if (trace != nullptr && current_step != nullptr) {
+        current_step->io_requests.push_back(node_id);
+      }
+    };
+    
+    auto record_io_complete = [&]() {
+      if (trace != nullptr && current_step != nullptr) {
+        auto now = std::chrono::high_resolution_clock::now();
+        current_step->io_complete_ts = std::chrono::duration_cast<std::chrono::microseconds>(
+            now - trace_start_time).count();
+      }
+    };
+
     uint64_t n_computes = 0;
-    auto compute_and_push_nbrs = [&](const char *node_buf, unsigned &nk) {
+    auto compute_and_push_nbrs = [&](const char *node_buf, unsigned &nk, uint32_t pivot_id) {
       unsigned *node_nbrs = offset_to_node_nhood(node_buf);
       unsigned nnbrs = *(node_nbrs++);
       unsigned nbors_cand_size = 0;
+      
+      // 用于追踪：记录所有逻辑邻居和缓存命中
+      std::vector<uint32_t> all_neighbors;
+      std::vector<uint32_t> cache_hit_list;
+      
+      if (trace != nullptr) {
+        all_neighbors.reserve(nnbrs);
+        for (unsigned m = 0; m < nnbrs; ++m) {
+          all_neighbors.push_back(node_nbrs[m]);
+        }
+      }
+      
       for (unsigned m = 0; m < nnbrs; ++m) {
         if (visited.find(node_nbrs[m]) == visited.end()) {
           node_nbrs[nbors_cand_size++] = node_nbrs[m];
           visited.insert(node_nbrs[m]);
+        } else if (trace != nullptr) {
+          // 已访问过的邻居视为缓存命中
+          cache_hit_list.push_back(node_nbrs[m]);
         }
+      }
+      
+      // 启动新的追踪步骤
+      start_new_trace_step(pivot_id);
+      if (trace != nullptr && current_step != nullptr) {
+        current_step->logic_neighbors = all_neighbors;
+        current_step->neighbor_page_ids.reserve(all_neighbors.size());
+        for (uint32_t nbr : all_neighbors) {
+          current_step->neighbor_page_ids.push_back(id2page(nbr));
+        }
+        current_step->cache_hits = cache_hit_list;
       }
 
       n_computes += nbors_cand_size;
@@ -148,6 +204,7 @@ namespace pipeann {
       stats->cpu_us1 = 0;
       stats->cpu_us2 = 0;
     }
+
     // search in in-memory index.
 
     int64_t cur_beam_width = std::min(4ul, beam_width);  // before converge.
@@ -197,6 +254,10 @@ namespace pipeann {
       if (stats != nullptr) {
         stats->n_ios++;
       }
+      
+      // 追踪 I/O 请求
+      record_io_request(item.id);
+      
       return true;
     };
 
@@ -208,6 +269,9 @@ namespace pipeann {
       while (!on_flight_ios.empty() && on_flight_ios.front().finished()) {
         io_t &io = on_flight_ios.front();
         id_buf_map.insert(std::make_pair(io.nbr.id, offset_to_loc((char *) io.read_req->buf, io.loc)));
+        
+        // 追踪 I/O 完成
+        record_io_complete();
         io.nbr.distance <= retset[cur_list_size - 1].distance ? ++n_in : ++n_out;
         // unlock the corresponding page.
         this->unlock_idx(idx_lock_table, io.nbr.id);
@@ -247,7 +311,7 @@ namespace pipeann {
           auto it = id_buf_map.find(retset[marker].id);
           auto [id, buf] = *it;
           compute_exact_dists_and_push(buf, id);
-          compute_and_push_nbrs(buf, nk);
+          compute_and_push_nbrs(buf, nk, id);  // 添加 pivot_id 参数
           break;
         }
       }
@@ -361,6 +425,15 @@ namespace pipeann {
     if (stats != nullptr) {
       stats->total_us = (double) query_timer.elapsed();
     }
+    
+    // 完成追踪统计
+    if (trace != nullptr) {
+      auto trace_end_time = std::chrono::high_resolution_clock::now();
+      trace->total_time_us = std::chrono::duration_cast<std::chrono::microseconds>(
+          trace_end_time - trace_start_time).count();
+      trace->finalize();
+    }
+    
     return t;
   }
 

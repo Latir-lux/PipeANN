@@ -281,7 +281,7 @@ def plot_lpms_comparison(lpms_static: List[float], lpms_dynamic: List[float],
     
     if data:
         bp = ax.boxplot(data, labels=labels, patch_artist=True)
-        colors = ['lightblue', 'lightorange'][:len(data)]
+        colors = ['lightblue', 'lightsalmon'][:len(data)]
         for patch, color in zip(bp['boxes'], colors):
             patch.set_facecolor(color)
     

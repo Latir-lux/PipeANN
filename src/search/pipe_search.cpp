@@ -389,18 +389,56 @@ namespace pipeann {
     }
     
     auto send_read_req = [&](Neighbor &item) -> bool {
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "send_read_req: item.id=" << item.id << std::endl;
+        debug_log.flush();
+      }
+      
       item.flag = false;
 
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "  calling lock_idx..." << std::endl;
+        debug_log.flush();
+      }
+      
       // lock the corresponding page.
       this->lock_idx(idx_lock_table, item.id, std::vector<uint32_t>(), true);
+      
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "  lock_idx completed, calling id2loc..." << std::endl;
+        debug_log.flush();
+      }
+      
       const unsigned loc = id2loc(item.id), pid = loc_sector_no(loc);
+
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "  id2loc returned loc=" << loc << ", pid=" << pid << std::endl;
+        debug_log.flush();
+      }
 
       uint64_t &cur_buf_idx = query_buf->sector_idx;
       auto buf = sector_scratch + cur_buf_idx * size_per_io;
+      
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "  creating IORequest..." << std::endl;
+        debug_log.flush();
+      }
+      
       auto &req = query_buf->reqs[cur_buf_idx];
       req = IORequest(static_cast<uint64_t>(pid) * SECTOR_LEN, size_per_io, buf, u_loc_offset(loc), max_node_len,
                       sector_scratch);
+      
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "  IORequest created, calling send_read_no_alloc..." << std::endl;
+        debug_log.flush();
+      }
+      
       reader->send_read_no_alloc(req, ctx);
+
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "  send_read_no_alloc completed, pushing to on_flight_ios..." << std::endl;
+        debug_log.flush();
+      }
 
       on_flight_ios.push(io_t{item, pid, loc, &req});
       cur_buf_idx = (cur_buf_idx + 1) % MAX_N_SECTOR_READS;
@@ -452,19 +490,66 @@ namespace pipeann {
 
     auto send_best_read_req = [&](uint32_t n) -> bool {
       // auto io_st = std::chrono::high_resolution_clock::now();
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "send_best_read_req called with n=" << n << ", cur_list_size=" << cur_list_size << std::endl;
+        debug_log.flush();
+      }
+      
       unsigned n_sent = 0, marker = 0;
+      
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "Entering send_best_read_req while loop" << std::endl;
+        debug_log.flush();
+      }
+      
       while (marker < cur_list_size && n_sent < n) {
+        if (trace != nullptr && debug_log.is_open()) {
+          debug_log << "send_best_read_req: outer while, marker=" << marker << ", n_sent=" << n_sent << std::endl;
+          debug_log.flush();
+        }
+        
         while (marker < cur_list_size /* pool size */ &&
                (retset[marker].flag == false /* on flight */ ||
                 id_buf_map.find(retset[marker].id) != id_buf_map.end() /* already read */)) {
+          if (trace != nullptr && debug_log.is_open()) {
+            debug_log << "  inner while: marker=" << marker << ", skipping node " << retset[marker].id << std::endl;
+            debug_log.flush();
+          }
           retset[marker].flag = false;  // even out the id_buf_map cost to O(1)
           ++marker;
         }
+        
+        if (trace != nullptr && debug_log.is_open()) {
+          debug_log << "  inner while done, marker=" << marker << ", cur_list_size=" << cur_list_size << std::endl;
+          debug_log.flush();
+        }
+        
         if (marker >= cur_list_size) {
+          if (trace != nullptr && debug_log.is_open()) {
+            debug_log << "  marker >= cur_list_size, breaking" << std::endl;
+            debug_log.flush();
+          }
           break;  // nothing to send.
         }
+        
+        if (trace != nullptr && debug_log.is_open()) {
+          debug_log << "  calling send_read_req for retset[" << marker << "].id=" << retset[marker].id << std::endl;
+          debug_log.flush();
+        }
+        
         n_sent += send_read_req(retset[marker]);
+        
+        if (trace != nullptr && debug_log.is_open()) {
+          debug_log << "  send_read_req returned, n_sent=" << n_sent << std::endl;
+          debug_log.flush();
+        }
       }
+      
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "send_best_read_req completed, returning " << (n_sent != 0) << std::endl;
+        debug_log.flush();
+      }
+      
       // auto io_ed = std::chrono::high_resolution_clock::now();
       // stats->io_us += std::chrono::duration_cast<std::chrono::microseconds>(io_ed - io_st).count();
       return n_sent != 0;  // nothing to send.

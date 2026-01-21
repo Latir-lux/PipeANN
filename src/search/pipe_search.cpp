@@ -430,6 +430,9 @@ namespace pipeann {
       
       if (trace != nullptr && debug_log.is_open()) {
         debug_log << "  IORequest created, calling send_read_no_alloc..." << std::endl;
+        debug_log << "    ctx pointer: " << ctx << std::endl;
+        debug_log << "    reader pointer: " << reader << std::endl;
+        debug_log << "    req.offset: " << req.offset << ", req.len: " << req.len << ", req.buf: " << (void*)req.buf << std::endl;
         debug_log.flush();
       }
       

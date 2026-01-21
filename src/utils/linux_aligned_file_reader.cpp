@@ -152,7 +152,15 @@ void LinuxAlignedFileReader::write_fd(int fd, std::vector<IORequest> &write_reqs
 
 void LinuxAlignedFileReader::send_io(IORequest &req, void *ctx, bool write) {
   io_uring *ring = (io_uring *) ctx;
+  if (ring == nullptr) {
+    LOG(ERROR) << "ERROR: ring is nullptr in send_io(IORequest)";
+    abort();
+  }
   auto sqe = io_uring_get_sqe(ring);
+  if (sqe == nullptr) {
+    LOG(ERROR) << "ERROR: io_uring_get_sqe returned nullptr - submission queue might be full";
+    abort();
+  }
   req.finished = false;
   sqe->user_data = (uint64_t) &req;
   if (write) {
@@ -165,8 +173,16 @@ void LinuxAlignedFileReader::send_io(IORequest &req, void *ctx, bool write) {
 
 void LinuxAlignedFileReader::send_io(std::vector<IORequest> &reqs, void *ctx, bool write) {
   io_uring *ring = (io_uring *) ctx;
+  if (ring == nullptr) {
+    LOG(ERROR) << "ERROR: ring is nullptr in send_io(vector)";
+    abort();
+  }
   for (uint64_t j = 0; j < reqs.size(); j++) {
     auto sqe = io_uring_get_sqe(ring);
+    if (sqe == nullptr) {
+      LOG(ERROR) << "ERROR: io_uring_get_sqe returned nullptr at index " << j << ", reqs.size=" << reqs.size();
+      abort();
+    }
     reqs[j].finished = false;
     sqe->user_data = (uint64_t) &reqs[j];
     if (write) {

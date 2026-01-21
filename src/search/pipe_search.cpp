@@ -93,26 +93,28 @@ namespace pipeann {
 
     // Trace initialization - 必须在 compute_and_push_nbrs 之前定义
     uint32_t trace_step_id = 0;
-    AccessStep *current_step = nullptr;
+    // 使用索引而非指针，避免 vector 重分配导致指针悬空
+    size_t current_step_idx = SIZE_MAX;  // 无效索引
     auto trace_start_time = std::chrono::high_resolution_clock::now();
     
     auto start_new_trace_step = [&](uint32_t pivot_id) {
       if (trace != nullptr) {
         trace->steps.emplace_back();
-        current_step = &trace->steps.back();
-        current_step->step_id = trace_step_id++;
-        current_step->pivot_node_id = pivot_id;
+        current_step_idx = trace->steps.size() - 1;
+        auto& step = trace->steps[current_step_idx];
+        step.step_id = trace_step_id++;
+        step.pivot_node_id = pivot_id;
         if (pivot_id < num_points) {
-          current_step->pivot_page_id = id2page(pivot_id);
+          step.pivot_page_id = id2page(pivot_id);
         } else {
-          current_step->pivot_page_id = kInvalidID;
+          step.pivot_page_id = kInvalidID;
         }
       }
     };
     
     auto record_io_request = [&](uint32_t node_id) {
-      if (trace != nullptr && current_step != nullptr) {
-        current_step->io_requests.push_back(node_id);
+      if (trace != nullptr && current_step_idx < trace->steps.size()) {
+        trace->steps[current_step_idx].io_requests.push_back(node_id);
       }
     };
     
@@ -121,8 +123,10 @@ namespace pipeann {
         auto now = std::chrono::high_resolution_clock::now();
         double ts = std::chrono::duration_cast<std::chrono::microseconds>(
             now - trace_start_time).count();
-        if (current_step != nullptr && current_step->pivot_node_id == node_id) {
-          current_step->io_complete_ts = ts;
+        // 记录到当前步骤（如果有效）
+        if (current_step_idx < trace->steps.size() && 
+            trace->steps[current_step_idx].pivot_node_id == node_id) {
+          trace->steps[current_step_idx].io_complete_ts = ts;
         }
       }
     };
@@ -156,17 +160,18 @@ namespace pipeann {
       
       // 启动新的追踪步骤
       start_new_trace_step(pivot_id);
-      if (trace != nullptr && current_step != nullptr) {
-        current_step->logic_neighbors = all_neighbors;
-        current_step->neighbor_page_ids.reserve(all_neighbors.size());
+      if (trace != nullptr && current_step_idx < trace->steps.size()) {
+        auto& step = trace->steps[current_step_idx];
+        step.logic_neighbors = all_neighbors;
+        step.neighbor_page_ids.reserve(all_neighbors.size());
         for (uint32_t nbr : all_neighbors) {
           if (nbr < num_points) {
-            current_step->neighbor_page_ids.push_back(id2page(nbr));
+            step.neighbor_page_ids.push_back(id2page(nbr));
           } else {
-            current_step->neighbor_page_ids.push_back(kInvalidID);
+            step.neighbor_page_ids.push_back(kInvalidID);
           }
         }
-        current_step->cache_hits = cache_hit_list;
+        step.cache_hits = cache_hit_list;
       }
 
       n_computes += nbors_cand_size;

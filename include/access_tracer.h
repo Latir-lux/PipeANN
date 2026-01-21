@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <deque>
 #include <string>
 #include <fstream>
 #include <chrono>
@@ -70,12 +71,15 @@ struct QueryTrace {
 
 /**
  * @brief 访问追踪器 - 管理多个查询的追踪信息并输出
+ * 
+ * 注意：此类在多线程环境下需要外部同步（如 #pragma omp critical）
+ * 或使用 reserve_traces 预分配避免 vector 重分配
  */
 class AccessTracer {
 public:
   bool enabled;
   std::string output_path;
-  std::vector<std::unique_ptr<QueryTrace>> traces;
+  std::deque<std::unique_ptr<QueryTrace>> traces;  // 使用 deque 避免重分配导致的指针失效
   
   AccessTracer() : enabled(false) {}
   

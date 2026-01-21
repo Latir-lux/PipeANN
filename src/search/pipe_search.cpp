@@ -279,30 +279,102 @@ namespace pipeann {
     }
 
     int64_t cur_beam_width = std::min(4ul, beam_width);  // before converge.
+    
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "Creating mem_tags and mem_dists vectors, mem_L=" << mem_L << std::endl;
+      debug_log.flush();
+    }
+    
     std::vector<unsigned> mem_tags(mem_L);
     std::vector<float> mem_dists(mem_L);
+    
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "Vectors created successfully" << std::endl;
+      debug_log.flush();
+    }
 
 #ifdef OVERLAP_INIT
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "Using OVERLAP_INIT branch" << std::endl;
+      debug_log.flush();
+    }
     if (mem_L) {
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "mem_L > 0, calling mem_index_->search_with_tags_fast..." << std::endl;
+        debug_log.flush();
+      }
       mem_index_->search_with_tags_fast(query, mem_L, mem_tags.data(), mem_dists.data());
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "search_with_tags_fast completed, adding to retset..." << std::endl;
+        debug_log.flush();
+      }
       add_to_retset(mem_tags.data(), std::min((uint64_t) mem_L, l_search), mem_dists.data());
     } else {
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "mem_L == 0, cannot overlap. Initializing query..." << std::endl;
+        debug_log.flush();
+      }
       // cannot overlap.
       nbr_handler->initialize_query(query, query_buf);
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "Query initialized, computing dists for medoid..." << std::endl;
+        debug_log.flush();
+      }
       nbr_handler->compute_dists(query_buf, &medoid, 1);
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "Dists computed, adding medoid to retset..." << std::endl;
+        debug_log.flush();
+      }
       add_to_retset(&medoid, 1, dist_scratch);
     }
 #else
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "Using NO_OVERLAP branch" << std::endl;
+      debug_log.flush();
+    }
     if (mem_L) {
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "mem_L > 0, calling mem_index_->search_with_tags_fast..." << std::endl;
+        debug_log.flush();
+      }
       mem_index_->search_with_tags_fast(query, mem_L, mem_tags.data(), mem_dists.data());
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "search_with_tags_fast completed, computing dists..." << std::endl;
+        debug_log.flush();
+      }
       nbr_handler->compute_dists(query_buf, mem_tags.data(), mem_L);
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "compute_dists completed, adding to retset..." << std::endl;
+        debug_log.flush();
+      }
       add_to_retset(mem_tags.data(), std::min((uint64_t) mem_L, l_search), dist_scratch);
     } else {
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "mem_L == 0, computing dists for medoid (medoid=" << medoid << ")..." << std::endl;
+        debug_log.flush();
+      }
       nbr_handler->compute_dists(query_buf, &medoid, 1);
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "compute_dists completed, adding medoid to retset..." << std::endl;
+        debug_log.flush();
+      }
       add_to_retset(&medoid, 1, dist_scratch);
     }
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "Sorting retset (cur_list_size=" << cur_list_size << ")..." << std::endl;
+      debug_log.flush();
+    }
     std::sort(retset.begin(), retset.begin() + cur_list_size);
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "Sort completed" << std::endl;
+      debug_log.flush();
+    }
 #endif
+
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "Memory index search completed successfully" << std::endl;
+      debug_log.flush();
+    }
 
     std::queue<io_t> on_flight_ios;
     auto send_read_req = [&](Neighbor &item) -> bool {

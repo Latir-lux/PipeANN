@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)  # 正确：设置C++标准为17
 set(CMAKE_CXX_STANDARD_REQUIRED ON)  # 要求强制支持C++17
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-option(USE_AIO "Use AIO instead of liburing" OFF)
+option(USE_AIO "Use AIO instead of liburing" ON)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # set(CMAKE_C_COMPILER_LAUNCHER ccache)
@@ -45,18 +45,17 @@ add_definitions(
 	-DOVERLAP_INIT
 )
 
-include_directories(
-	${PROJECT_SOURCE_DIR}/third_party/liburing/src/include
-)
-link_directories(
-	${PROJECT_SOURCE_DIR}/third_party/liburing/src
-)
-
 if(USE_AIO)
 	message(STATUS "Using AIO for asynchronous I/O, compatible but slower.")
 	link_libraries(aio)
 	add_definitions(-DUSE_AIO)
 else()
+	include_directories(
+		${PROJECT_SOURCE_DIR}/third_party/liburing/src/include
+	)
+	link_directories(
+		${PROJECT_SOURCE_DIR}/third_party/liburing/src
+	)
 	message(STATUS "Using liburing for asynchronous I/O, faster but requires kernel support.")
 	link_libraries(uring)
 endif()

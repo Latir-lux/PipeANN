@@ -563,38 +563,16 @@ void LinuxAlignedFileReader::poll_wait(void *ctx) {
 
 int LinuxAlignedFileReader::send_read_no_alloc(IORequest &req, void *ring) {
 #ifndef READ_ONLY_TESTS
-  std::cerr << "[send_read_no_alloc] START: ring=" << ring << ", req.offset=" << req.offset 
-            << ", SECTOR_LEN=" << SECTOR_LEN << std::endl;
-  std::cerr.flush();
-  
   uint64_t block_no = req.offset / SECTOR_LEN;
-  std::cerr << "[send_read_no_alloc] block_no=" << block_no << ", req.buf=" << (void*)req.buf << std::endl;
-  std::cerr.flush();
-  
-  std::cerr << "[send_read_no_alloc] About to call v2::cache.get..." << std::endl;
-  std::cerr.flush();
-  
   bool cache_hit = v2::cache.get(block_no, (uint8_t *) req.buf);
-  
-  std::cerr << "[send_read_no_alloc] v2::cache.get returned: " << cache_hit << std::endl;
-  std::cerr.flush();
-  
   if (!cache_hit) {
-    std::cerr << "[send_read_no_alloc] Cache miss, calling send_io..." << std::endl;
-    std::cerr.flush();
     send_io(req, ring, false);
-    std::cerr << "[send_read_no_alloc] send_io completed" << std::endl;
-    std::cerr.flush();
   } else {
-    std::cerr << "[send_read_no_alloc] Cache hit, marking finished" << std::endl;
-    std::cerr.flush();
-    req.finished = true;  // mark as finished for cache miss
+    req.finished = true;
   }
 #else
   send_io(req, ring, false);
 #endif
-  std::cerr << "[send_read_no_alloc] END, returning 1" << std::endl;
-  std::cerr.flush();
   return 1;
 }
 

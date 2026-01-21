@@ -436,48 +436,7 @@ namespace pipeann {
         debug_log.flush();
       }
       
-      std::cerr << "[pipe_search] BEFORE send_read_no_alloc call: reader=" << reader 
-                << ", ctx=" << ctx << ", req.buf=" << (void*)req.buf << std::endl;
-      std::cerr.flush();
-      
-      // Validate reader pointer
-      if (reader == nullptr) {
-        std::cerr << "[pipe_search] ERROR: reader is nullptr!" << std::endl;
-        std::cerr.flush();
-        abort();
-      }
-      
-      // Check if cur_buf_idx is within bounds
-      if (cur_buf_idx >= MAX_N_SECTOR_READS) {
-        std::cerr << "[pipe_search] ERROR: cur_buf_idx=" << cur_buf_idx << " >= MAX_N_SECTOR_READS=" << MAX_N_SECTOR_READS << std::endl;
-        std::cerr.flush();
-        abort();
-      }
-      
-      // Check buffer pointer validity
-      if (buf == nullptr) {
-        std::cerr << "[pipe_search] ERROR: buf is nullptr!" << std::endl;
-        std::cerr.flush();
-        abort();
-      }
-      
-      // Write to file for crash logging
-      std::ofstream crash_log("./log/crash_debug.log", std::ios::app);
-      crash_log << "About to call send_read_no_alloc: reader=" << reader << ", ctx=" << ctx 
-                << ", cur_buf_idx=" << cur_buf_idx << std::endl;
-      crash_log.flush();
-      crash_log.close();
-      
-      try {
-        reader->send_read_no_alloc(req, ctx);
-      } catch (const std::exception &e) {
-        std::cerr << "[pipe_search] EXCEPTION in send_read_no_alloc: " << e.what() << std::endl;
-        std::cerr.flush();
-        throw;
-      }
-      
-      std::cerr << "[pipe_search] AFTER send_read_no_alloc call completed successfully" << std::endl;
-      std::cerr.flush();
+      reader->send_read_no_alloc(req, ctx);
 
       if (trace != nullptr && debug_log.is_open()) {
         debug_log << "  send_read_no_alloc completed, pushing to on_flight_ios..." << std::endl;

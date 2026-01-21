@@ -11,19 +11,18 @@
 # MODIFY THESE PATHS TO MATCH YOUR ENVIRONMENT:
 
 # Data files
-DATA_BIN="/mnt/nvme/data/bigann/bigann_200M.bbin"    # Binary data file for insertion
-QUERY_FILE="/mnt/nvme/data/bigann/bigann_query.bbin" # Query file
+DATA_BIN="/mnt/xiaoxuanx/dataset/sift/sift_base.fbin"    # Binary data file for insertion
+QUERY_FILE="/mnt/xiaoxuanx/dataset/sift/sift_query.fbin" # Query file
 
 # Index files (pre-built with 50% data)
-INDEX_PREFIX="/mnt/nvme/indices_upd/bigann/100M"     # Index prefix path
-
+INDEX_PREFIX="/mnt/xiaoxuanx/dataset/sift/sift_index"     # Index prefix path
 # Output directory for results
-OUTPUT_DIR="/home/latir/WorkSpace/PipeANN/draw"
+OUTPUT_DIR="/mnt/xiaoxuanx/dataset/sift/draw"
 
 # ========== END DATA PATH CONFIGURATION ==========
 
 # Experiment parameters
-TYPE="uint8"           # Data type: int8, uint8, or float
+TYPE="float"           # Data type: int8, uint8, or float
 L_DISK=128             # L parameter for disk index
 VECS_PER_STEP=1000000  # 1M vectors per step
 NUM_STEPS=10           # 10 steps = 10M total insertions

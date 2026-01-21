@@ -104,6 +104,7 @@ namespace pipeann {
       debug_log.open("./log/pipe_search_debug.log", std::ios::app);
       debug_log << "=== Query start, trace enabled ===" << std::endl;
       debug_log << "num_points: " << num_points << std::endl;
+      debug_log.flush();
     }
     
     auto start_new_trace_step = [&](uint32_t pivot_id) {
@@ -249,16 +250,33 @@ namespace pipeann {
       }
     };
 
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "All lambdas defined successfully" << std::endl;
+      debug_log.flush();
+    }
+
     // stats.
     if (stats != nullptr) {
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "Initializing stats..." << std::endl;
+        debug_log.flush();
+      }
       stats->io_us = 0;
       stats->io_us1 = 0;
       stats->cpu_us = 0;
       stats->cpu_us1 = 0;
       stats->cpu_us2 = 0;
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "Stats initialized" << std::endl;
+        debug_log.flush();
+      }
     }
 
     // search in in-memory index.
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "About to search in memory index, mem_L=" << mem_L << std::endl;
+      debug_log.flush();
+    }
 
     int64_t cur_beam_width = std::min(4ul, beam_width);  // before converge.
     std::vector<unsigned> mem_tags(mem_L);

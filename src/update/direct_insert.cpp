@@ -68,7 +68,8 @@ namespace pipeann {
     cur_loc++;  // for target ID, atomic update.
     set_loc2id(target_id, target_id);
 #else
-    auto locs = this->alloc_loc(new_nhood.size() + 1, page_ref, pages_need_to_read);
+    // Clu-Alloc Experiment: Use strategy-based allocation
+    auto locs = this->alloc_loc_strategy(new_nhood.size() + 1, page_ref, new_nhood, pages_need_to_read);
 #endif
 
     std::set<uint64_t> pages_to_rmw_set;
@@ -196,6 +197,10 @@ namespace pipeann {
     // update locs
     // no concurrency issue for target_id (as it can be only inserted).
     set_id2loc(target_id, locs[new_nhood.size()]);
+    
+    // Clu-Alloc Experiment: Update intra-page edge statistics after id2loc is set
+    update_intra_page_stats(target_id, new_nhood);
+    
     auto locked = lock_idx(idx_lock_table, target_id, new_nhood);
     auto page_locked = lock_page_idx(page_idx_lock_table, target_id, new_nhood);
     std::vector<uint64_t> orig_locs;

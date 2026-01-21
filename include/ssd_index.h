@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <string>
 #include <set>
+#include <unordered_map>
+#include <random>
 #include "nbr/abstract_nbr.h"
 #include <omp.h>
 
@@ -22,6 +24,13 @@
 constexpr int kIndexSizeFactor = 2;
 
 enum SearchMode { BEAM_SEARCH = 0, PAGE_SEARCH = 1, PIPE_SEARCH = 2, CORO_SEARCH = 3 };
+
+// Allocation strategies for dynamic insertion (Clu-Alloc experiment)
+enum AllocStrategy {
+  ALLOC_APPEND = 0,   // Append-Only: always allocate at the tail (baseline)
+  ALLOC_RANDOM = 1,   // Random-Alloc: randomly pick from available pages
+  ALLOC_CLUSTER = 2   // Clu-Alloc: cluster-aware allocation based on connection strength
+};
 
 namespace pipeann {
   template<typename T, typename TagT = uint32_t>
@@ -454,6 +463,53 @@ namespace pipeann {
     std::mutex alloc_lock;
     ConcurrentQueue<uint32_t> empty_pages = ConcurrentQueue<uint32_t>(kInvalidID);
 
+    // ========== Clu-Alloc Experiment: Allocation Strategy ==========
+    AllocStrategy alloc_strategy_ = ALLOC_APPEND;  // Default: Append-Only (baseline)
+    
+    // Page bitmap for slot tracking (bit set = occupied, bit clear = free)
+    // page_bitmap_[page_no] contains bitmap for each page
+    std::unordered_map<uint64_t, std::vector<bool>> page_bitmap_;
+    std::mutex page_bitmap_lock_;
+    
+    // Experiment statistics
+    struct CluAllocStats {
+      std::atomic<uint64_t> total_insertions{0};
+      std::atomic<uint64_t> cluster_alloc_hits{0};    // Nodes placed in neighbor pages
+      std::atomic<uint64_t> random_alloc_count{0};    // Nodes placed randomly
+      std::atomic<uint64_t> append_alloc_count{0};    // Nodes placed at tail
+      std::atomic<uint64_t> overflow_count{0};        // Nodes that overflowed to new pages
+      std::atomic<uint64_t> intra_page_edges{0};      // Edges within same page
+      std::atomic<uint64_t> total_edges{0};           // Total edges for ratio computation
+      
+      void reset() {
+        total_insertions = 0;
+        cluster_alloc_hits = 0;
+        random_alloc_count = 0;
+        append_alloc_count = 0;
+        overflow_count = 0;
+        intra_page_edges = 0;
+        total_edges = 0;
+      }
+      
+      double get_intra_page_ratio() const {
+        return total_edges > 0 ? (double)intra_page_edges / total_edges : 0.0;
+      }
+    };
+    CluAllocStats clu_alloc_stats_;
+    
+    void set_alloc_strategy(AllocStrategy strategy) {
+      alloc_strategy_ = strategy;
+      LOG(INFO) << "Allocation strategy set to: " 
+                << (strategy == ALLOC_APPEND ? "APPEND" : 
+                    (strategy == ALLOC_RANDOM ? "RANDOM" : "CLUSTER"));
+    }
+    
+    AllocStrategy get_alloc_strategy() const { return alloc_strategy_; }
+    
+    const CluAllocStats& get_clu_alloc_stats() const { return clu_alloc_stats_; }
+    void reset_clu_alloc_stats() { clu_alloc_stats_.reset(); }
+    // ========== End Clu-Alloc Experiment ==========
+
     using PageArr = std::vector<uint32_t>;
 
     PageArr get_page_layout(uint32_t page_no) {
@@ -607,6 +663,208 @@ namespace pipeann {
       }
       return ret;
     }
+
+    // ========== Clu-Alloc Experiment: Extended Allocation Functions ==========
+    
+    // Compute connection strength score for each candidate page
+    // S_score = sum of (1 / rank_i) for neighbors in the page
+    // Returns a vector of (page_no, score) pairs sorted by score in descending order
+    std::vector<std::pair<uint64_t, double>> compute_page_scores(
+        const std::vector<uint32_t>& neighbors) {
+      std::unordered_map<uint64_t, double> page_scores;
+      
+      for (size_t rank = 0; rank < neighbors.size(); ++rank) {
+        uint32_t nbr_id = neighbors[rank];
+        uint64_t page_no = id2page(nbr_id);
+        if (page_no == kInvalidID) continue;
+        
+        // Connection strength: 1 / (rank + 1), rank is 0-based
+        double strength = 1.0 / (rank + 1);
+        page_scores[page_no] += strength;
+      }
+      
+      // Sort by score descending
+      std::vector<std::pair<uint64_t, double>> sorted_scores(page_scores.begin(), page_scores.end());
+      std::sort(sorted_scores.begin(), sorted_scores.end(),
+                [](const auto& a, const auto& b) { return a.second > b.second; });
+      
+      return sorted_scores;
+    }
+    
+    // Count free slots in a page
+    uint32_t count_free_slots(uint64_t page_no) {
+      uint32_t cnt = 0;
+      auto st = sector_to_loc(page_no, 0);
+      auto ed = nnodes_per_sector == 0 ? st + 1 : st + nnodes_per_sector;
+      for (uint32_t i = st; i < ed; ++i) {
+        if (loc2id_[i] == kInvalidID) {
+          cnt++;
+        }
+      }
+      return cnt;
+    }
+    
+    // Allocate slots using Random strategy
+    std::vector<uint64_t> alloc_loc_random(int n, std::set<uint64_t>& page_need_to_read) {
+      std::lock_guard<std::mutex> lock(alloc_lock);
+      std::vector<uint64_t> ret;
+      int cur = 0;
+      
+      // Collect all pages with free slots
+      std::vector<uint64_t> available_pages;
+      uint64_t max_page = loc_sector_no(cur_loc.load());
+      for (uint64_t p = loc_sector_no(init_num_pts); p <= max_page; ++p) {
+        if (count_free_slots(p) > 0) {
+          available_pages.push_back(p);
+        }
+      }
+      
+      // Random shuffle
+      static thread_local std::mt19937 rng(std::random_device{}());
+      std::shuffle(available_pages.begin(), available_pages.end(), rng);
+      
+      // Allocate from random pages
+      for (auto& p : available_pages) {
+        if (cur == n) break;
+        
+        auto st = sector_to_loc(p, 0);
+        auto ed = nnodes_per_sector == 0 ? st + 1 : st + nnodes_per_sector;
+        bool has_occupied = false;
+        for (uint32_t i = st; i < ed; ++i) {
+          if (loc2id_[i] != kInvalidID && loc2id_[i] != kAllocatedID) {
+            has_occupied = true;
+            break;
+          }
+        }
+        if (has_occupied) {
+          page_need_to_read.insert(p);
+        }
+        
+        for (uint32_t i = st; i < ed; ++i) {
+          if (loc2id_[i] == kInvalidID) {
+            loc2id_[i] = kAllocatedID;
+            ret.push_back(i);
+            ++cur;
+            clu_alloc_stats_.random_alloc_count++;
+            if (cur == n) {
+              return ret;
+            }
+          }
+        }
+      }
+      
+      // Fallback to append for remaining
+      int remaining = n - cur;
+      for (int i = 0; i < remaining; i++) {
+        set_loc2id(cur_loc + i, kAllocatedID);
+        ret.push_back(cur_loc + i);
+        clu_alloc_stats_.append_alloc_count++;
+      }
+      
+      cur_loc += remaining;
+      while (nnodes_per_sector != 0 && cur_loc % nnodes_per_sector != 0) {
+        set_loc2id(cur_loc++, kInvalidID);
+      }
+      return ret;
+    }
+    
+    // Allocate slots using Cluster (Clu-Alloc) strategy
+    std::vector<uint64_t> alloc_loc_cluster(int n, const std::vector<uint32_t>& neighbors,
+                                            std::set<uint64_t>& page_need_to_read) {
+      std::lock_guard<std::mutex> lock(alloc_lock);
+      std::vector<uint64_t> ret;
+      int cur = 0;
+      
+      // Compute page scores based on neighbor connection strength
+      auto page_scores = compute_page_scores(neighbors);
+      
+      // 1. Try to allocate in high-score pages first
+      for (auto& [page_no, score] : page_scores) {
+#ifdef NO_POLLUTE_ORIGINAL
+        if (page_no < loc_sector_no(init_num_pts)) {
+          continue;
+        }
+#endif
+        if (cur == n) break;
+        
+        uint32_t free_slots = count_free_slots(page_no);
+        if (free_slots == 0) continue;
+        
+        auto st = sector_to_loc(page_no, 0);
+        auto ed = nnodes_per_sector == 0 ? st + 1 : st + nnodes_per_sector;
+        
+        // Check if page has occupied slots (need to read for RMW)
+        bool has_occupied = false;
+        for (uint32_t i = st; i < ed; ++i) {
+          if (loc2id_[i] != kInvalidID && loc2id_[i] != kAllocatedID) {
+            has_occupied = true;
+            break;
+          }
+        }
+        if (has_occupied) {
+          page_need_to_read.insert(page_no);
+        }
+        
+        for (uint32_t i = st; i < ed; ++i) {
+          if (loc2id_[i] == kInvalidID) {
+            loc2id_[i] = kAllocatedID;
+            ret.push_back(i);
+            ++cur;
+            clu_alloc_stats_.cluster_alloc_hits++;
+            if (cur == n) {
+              return ret;
+            }
+          }
+        }
+      }
+      
+      // 2. Fallback to append for remaining (overflow)
+      int remaining = n - cur;
+      if (remaining > 0) {
+        clu_alloc_stats_.overflow_count += remaining;
+      }
+      for (int i = 0; i < remaining; i++) {
+        set_loc2id(cur_loc + i, kAllocatedID);
+        ret.push_back(cur_loc + i);
+        clu_alloc_stats_.append_alloc_count++;
+      }
+      
+      cur_loc += remaining;
+      while (nnodes_per_sector != 0 && cur_loc % nnodes_per_sector != 0) {
+        set_loc2id(cur_loc++, kInvalidID);
+      }
+      return ret;
+    }
+    
+    // Unified allocation function that dispatches based on strategy
+    std::vector<uint64_t> alloc_loc_strategy(int n, const std::vector<uint64_t>& hint_pages,
+                                              const std::vector<uint32_t>& neighbors,
+                                              std::set<uint64_t>& page_need_to_read) {
+      clu_alloc_stats_.total_insertions++;
+      
+      switch (alloc_strategy_) {
+        case ALLOC_RANDOM:
+          return alloc_loc_random(n, page_need_to_read);
+        case ALLOC_CLUSTER:
+          return alloc_loc_cluster(n, neighbors, page_need_to_read);
+        case ALLOC_APPEND:
+        default:
+          // Use original alloc_loc for append-only
+          return alloc_loc(n, hint_pages, page_need_to_read);
+      }
+    }
+    
+    // Update intra-page edge statistics after insertion
+    void update_intra_page_stats(uint32_t target_id, const std::vector<uint32_t>& neighbors) {
+      uint64_t target_page = id2page(target_id);
+      for (auto& nbr_id : neighbors) {
+        clu_alloc_stats_.total_edges++;
+        if (id2page(nbr_id) == target_page) {
+          clu_alloc_stats_.intra_page_edges++;
+        }
+      }
+    }
+    // ========== End Clu-Alloc Experiment ==========
 
     void verify_id2loc() {
       // verify id -> loc -> id map.

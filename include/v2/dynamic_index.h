@@ -11,6 +11,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <sys/stat.h>
 
 namespace pipeann {
 
@@ -75,5 +76,37 @@ namespace pipeann {
     bool _use_mem_index = false;
     double _mem_index_ratio = 1.0;  // mem index size / disk index size
     int search_mode = BEAM_SEARCH;
+    
+    // ========== Clu-Alloc Experiment API ==========
+    void set_alloc_strategy(AllocStrategy strategy) {
+      if (_disk_index) {
+        _disk_index->set_alloc_strategy(strategy);
+      }
+    }
+    
+    AllocStrategy get_alloc_strategy() const {
+      return _disk_index ? _disk_index->get_alloc_strategy() : ALLOC_APPEND;
+    }
+    
+    const typename SSDIndex<T, TagT>::CluAllocStats& get_clu_alloc_stats() const {
+      return _disk_index->get_clu_alloc_stats();
+    }
+    
+    void reset_clu_alloc_stats() {
+      if (_disk_index) {
+        _disk_index->reset_clu_alloc_stats();
+      }
+    }
+    
+    // Get disk index size in bytes
+    uint64_t get_disk_index_size() const {
+      struct stat st;
+      std::string index_file = _disk_index_prefix_in + "_disk.index";
+      if (stat(index_file.c_str(), &st) == 0) {
+        return st.st_size;
+      }
+      return 0;
+    }
+    // ========== End Clu-Alloc Experiment API ==========
   };
 };  // namespace pipeann

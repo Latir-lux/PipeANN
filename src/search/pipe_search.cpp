@@ -465,15 +465,15 @@ namespace pipeann {
         }
         n_sent += send_read_req(retset[marker]);
       }
-    if (trace != nullptr && debug_log.is_open()) {
-      debug_log << "send_best_read_req lambda defined, defining calc_best_node..." << std::endl;
-      debug_log.flush();
-    }
-
       // auto io_ed = std::chrono::high_resolution_clock::now();
       // stats->io_us += std::chrono::duration_cast<std::chrono::microseconds>(io_ed - io_st).count();
       return n_sent != 0;  // nothing to send.
     };
+
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "send_best_read_req lambda defined, defining calc_best_node..." << std::endl;
+      debug_log.flush();
+    }
 
     auto calc_best_node = [&]() -> int {  // if converged.
       // auto cpu_st = std::chrono::high_resolution_clock::now();
@@ -537,19 +537,35 @@ namespace pipeann {
         LOG(INFO) << "on_flight_io: " << io.nbr.id << ", " << io.nbr.distance << ", " << io.nbr.flag << ", "
                   << io.page_id << ", " << io.loc << ", " << io.finished();
       }
+      usleep(500);
+    };
+
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "print_state lambda defined successfully" << std::endl;
+      debug_log.flush();
+    }
+
+    std::ignore = print_state;
+
     if (trace != nullptr && debug_log.is_open()) {
       debug_log << "All lambdas defined, starting main search loop..." << std::endl;
       debug_log << "cur_list_size=" << cur_list_size << ", l_search=" << l_search << std::endl;
       debug_log.flush();
     }
 
-      usleep(500);
-    };
-
-    std::ignore = print_state;
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "Starting main search loop, calling send_best_read_req..." << std::endl;
+      debug_log.flush();
+    }
 
     auto cpu2_st = std::chrono::high_resolution_clock::now();
     send_best_read_req(cur_beam_width - on_flight_ios.size());
+    
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "send_best_read_req completed" << std::endl;
+      debug_log.flush();
+    }
+    
     unsigned marker = 0, max_marker = 0;
 #ifdef OVERLAP_INIT
     if (likely(mem_L != 0)) {

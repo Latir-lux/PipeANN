@@ -8,15 +8,15 @@ set -e
 # 请根据实际环境修改以下路径
 
 # 数据集路径 (需要修改为实际路径)
-# SIFT100M 数据集
+# SIFT 数据集（本地构建）
+INDEX_PREFIX="/mnt/xiaoxuanx/dataset/sift/sift_index"                    # 索引文件前缀
+QUERY_BIN="/mnt/xiaoxuanx/dataset/sift/sift_query.fbin"                   # 查询向量文件
+TRUTHSET_BIN="/mnt/xiaoxuanx/dataset/sift/sift_groundtruth.ibin"         # Ground truth 文件
+
+# 如果要使用 BIGANN 数据集，取消注释下面的行：
 # INDEX_PREFIX="/mnt/nvme2/indices/bigann/100m"           # 索引文件前缀
 # QUERY_BIN="/mnt/nvme/data/bigann/bigann_query.bbin"     # 查询向量文件
 # TRUTHSET_BIN="/mnt/nvme/data/bigann/100M_gt.bin"        # Ground truth 文件
-
-# 也可以使用 SIFT1M 进行小规模测试
-INDEX_PREFIX="/mnt/nvme/indices/sift1m"
-QUERY_BIN="/path/to/sift/sift_query.bbin"
-TRUTHSET_BIN="/path/to/sift/sift_gt.bin"
 
 # 构建输出目录
 OUTPUT_DIR="$(dirname "$0")/../draw"

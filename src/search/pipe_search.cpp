@@ -461,6 +461,13 @@ namespace pipeann {
         abort();
       }
       
+      // Write to file for crash logging
+      std::ofstream crash_log("./log/crash_debug.log", std::ios::app);
+      crash_log << "About to call send_read_no_alloc: reader=" << reader << ", ctx=" << ctx 
+                << ", cur_buf_idx=" << cur_buf_idx << std::endl;
+      crash_log.flush();
+      crash_log.close();
+      
       try {
         reader->send_read_no_alloc(req, ctx);
       } catch (const std::exception &e) {

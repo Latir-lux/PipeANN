@@ -93,22 +93,22 @@ public:
     if (!enabled) return nullptr;
     
     // 调试日志
-    std::ofstream log(\"/home/latir/WorkSpace/PipeANN/log/tracer_debug.log\", std::ios::app);
+    std::ofstream log("./log/tracer_debug.log", std::ios::app);
     if (log.is_open()) {
-      log << \"new_trace called: query_id=\" << query_id << \", traces.size()=\" << traces.size() << std::endl;
+      log << "new_trace called: query_id=" << query_id << ", traces.size()=" << traces.size() << std::endl;
     }
     
     traces.emplace_back(std::make_unique<QueryTrace>());
     
     if (log.is_open()) {
-      log << \"  after emplace_back: traces.size()=\" << traces.size() << std::endl;
+      log << "  after emplace_back: traces.size()=" << traces.size() << std::endl;
     }
     
     traces.back()->reset(query_id);
     auto* ptr = traces.back().get();
     
     if (log.is_open()) {
-      log << \"  returning trace pointer: \" << (void*)ptr << std::endl;
+      log << "  returning trace pointer: " << (void*)ptr << std::endl;
       log.close();
     }
     

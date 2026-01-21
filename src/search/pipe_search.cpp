@@ -101,7 +101,7 @@ namespace pipeann {
     // 调试日志
     std::ofstream debug_log;
     if (trace != nullptr) {
-      debug_log.open("/home/latir/WorkSpace/PipeANN/log/pipe_search_debug.log", std::ios::app);
+      debug_log.open("./log/pipe_search_debug.log", std::ios::app);
       debug_log << "=== Query start, trace enabled ===" << std::endl;
       debug_log << "num_points: " << num_points << std::endl;
     }

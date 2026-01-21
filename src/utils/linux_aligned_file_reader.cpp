@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
+#include <unistd.h>
 #include "aligned_file_reader.h"
 #include "liburing.h"
 
@@ -78,6 +79,9 @@ void *LinuxAlignedFileReader::get_ctx(int flag) {
   if (unlikely(ioctx::ring == nullptr)) {
     register_thread(flag);
   }
+  if (ioctx::ring == nullptr && bad_ctx != nullptr) {
+    return bad_ctx;
+  }
   return ioctx::ring;
 }
 
@@ -88,6 +92,12 @@ void LinuxAlignedFileReader::register_thread(int flag) {
     if (ret < 0) {
       LOG(ERROR) << "io_uring_queue_init failed: " << strerror(-ret)
                  << " (flag=" << flag << ")";
+      if (ret == -ENOSYS) {
+        bad_ctx = reinterpret_cast<void *>(0x1);
+        delete ioctx::ring;
+        ioctx::ring = nullptr;
+        return;
+      }
       if (flag != 0) {
         ret = io_uring_queue_init(MAX_EVENTS, ioctx::ring, 0);
         if (ret < 0) {
@@ -165,9 +175,18 @@ void LinuxAlignedFileReader::write_fd(int fd, std::vector<IORequest> &write_reqs
 
 void LinuxAlignedFileReader::send_io(IORequest &req, void *ctx, bool write) {
   io_uring *ring = (io_uring *) ctx;
-  if (ring == nullptr) {
-    LOG(ERROR) << "ERROR: ring is nullptr in send_io(IORequest)";
-    abort();
+  if (ring == nullptr || ctx == bad_ctx) {
+    ssize_t ret = 0;
+    if (write) {
+      ret = ::pwrite(this->file_desc, req.buf, req.len, req.offset);
+    } else {
+      ret = ::pread(this->file_desc, req.buf, req.len, req.offset);
+    }
+    if (ret < 0) {
+      LOG(ERROR) << "pread/pwrite failed: " << strerror(errno);
+    }
+    req.finished = true;
+    return;
   }
   auto sqe = io_uring_get_sqe(ring);
   if (sqe == nullptr) {
@@ -186,9 +205,20 @@ void LinuxAlignedFileReader::send_io(IORequest &req, void *ctx, bool write) {
 
 void LinuxAlignedFileReader::send_io(std::vector<IORequest> &reqs, void *ctx, bool write) {
   io_uring *ring = (io_uring *) ctx;
-  if (ring == nullptr) {
-    LOG(ERROR) << "ERROR: ring is nullptr in send_io(vector)";
-    abort();
+  if (ring == nullptr || ctx == bad_ctx) {
+    for (auto &req : reqs) {
+      ssize_t ret = 0;
+      if (write) {
+        ret = ::pwrite(this->file_desc, req.buf, req.len, req.offset);
+      } else {
+        ret = ::pread(this->file_desc, req.buf, req.len, req.offset);
+      }
+      if (ret < 0) {
+        LOG(ERROR) << "pread/pwrite failed: " << strerror(errno);
+      }
+      req.finished = true;
+    }
+    return;
   }
   for (uint64_t j = 0; j < reqs.size(); j++) {
     auto sqe = io_uring_get_sqe(ring);
@@ -208,6 +238,9 @@ void LinuxAlignedFileReader::send_io(std::vector<IORequest> &reqs, void *ctx, bo
 }
 
 int LinuxAlignedFileReader::poll(void *ctx) {
+  if (ctx == bad_ctx || ctx == nullptr) {
+    return 0;
+  }
   io_uring *ring = (io_uring *) ctx;
   io_uring_cqe *cqe = nullptr;
   int ret = io_uring_peek_cqe(ring, &cqe);
@@ -226,6 +259,9 @@ int LinuxAlignedFileReader::poll(void *ctx) {
 }
 
 void LinuxAlignedFileReader::poll_all(void *ctx) {
+  if (ctx == bad_ctx || ctx == nullptr) {
+    return;
+  }
   io_uring *ring = (io_uring *) ctx;
   static __thread io_uring_cqe *cqes[MAX_EVENTS];
   int ret = io_uring_peek_batch_cqe(ring, cqes, MAX_EVENTS);
@@ -245,6 +281,9 @@ void LinuxAlignedFileReader::poll_all(void *ctx) {
 }
 
 void LinuxAlignedFileReader::poll_wait(void *ctx) {
+  if (ctx == bad_ctx || ctx == nullptr) {
+    return;
+  }
   io_uring *ring = (io_uring *) ctx;
   io_uring_cqe *cqe = nullptr;
   int ret = 0;

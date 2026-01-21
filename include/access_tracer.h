@@ -1,7 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include <deque>
+#include <memory>
 #include <vector>
 #include <string>
 #include <fstream>
@@ -75,7 +75,7 @@ class AccessTracer {
 public:
   bool enabled;
   std::string output_path;
-  std::deque<QueryTrace> traces;
+  std::vector<std::unique_ptr<QueryTrace>> traces;
   
   AccessTracer() : enabled(false) {}
   
@@ -87,9 +87,9 @@ public:
   
   QueryTrace* new_trace(uint32_t query_id) {
     if (!enabled) return nullptr;
-    traces.emplace_back();
-    traces.back().reset(query_id);
-    return &traces.back();
+    traces.emplace_back(std::make_unique<QueryTrace>());
+    traces.back()->reset(query_id);
+    return traces.back().get();
   }
   
   /**
@@ -101,7 +101,8 @@ public:
       return;
     }
     
-    for (const auto& trace : traces) {
+    for (const auto& trace_ptr : traces) {
+      const auto& trace = *trace_ptr;
       ofs << "{\"query_id\":" << trace.query_id 
           << ",\"total_time_us\":" << std::fixed << std::setprecision(2) << trace.total_time_us
           << ",\"total_ios\":" << trace.total_ios
@@ -156,7 +157,8 @@ public:
     ofs << "query_id,step_id,pivot_node_id,pivot_page_id,num_neighbors,"
         << "num_cache_hits,num_io_requests,io_complete_ts\n";
     
-    for (const auto& trace : traces) {
+    for (const auto& trace_ptr : traces) {
+      const auto& trace = *trace_ptr;
       for (const auto& step : trace.steps) {
         ofs << trace.query_id << ","
             << step.step_id << ","
@@ -184,7 +186,8 @@ public:
     ofs << "query_id,step_id,pivot_node_id,neighbor_id,neighbor_page_id,"
         << "is_cache_hit,is_io_request\n";
     
-    for (const auto& trace : traces) {
+    for (const auto& trace_ptr : traces) {
+      const auto& trace = *trace_ptr;
       for (const auto& step : trace.steps) {
         for (size_t i = 0; i < step.logic_neighbors.size(); ++i) {
           uint32_t nbr_id = step.logic_neighbors[i];
@@ -234,7 +237,8 @@ public:
     // CSV header
     ofs << "query_id,step_id,pivot_page_id,neighbor_page_ids\n";
     
-    for (const auto& trace : traces) {
+    for (const auto& trace_ptr : traces) {
+      const auto& trace = *trace_ptr;
       for (const auto& step : trace.steps) {
         ofs << trace.query_id << ","
             << step.step_id << ","

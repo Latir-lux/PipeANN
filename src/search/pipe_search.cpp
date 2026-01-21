@@ -102,7 +102,11 @@ namespace pipeann {
         current_step = &trace->steps.back();
         current_step->step_id = trace_step_id++;
         current_step->pivot_node_id = pivot_id;
-        current_step->pivot_page_id = id2page(pivot_id);
+        if (pivot_id < num_points) {
+          current_step->pivot_page_id = id2page(pivot_id);
+        } else {
+          current_step->pivot_page_id = kInvalidID;
+        }
       }
     };
     
@@ -112,11 +116,14 @@ namespace pipeann {
       }
     };
     
-    auto record_io_complete = [&]() {
-      if (trace != nullptr && current_step != nullptr) {
+    auto record_io_complete = [&](uint32_t node_id) {
+      if (trace != nullptr) {
         auto now = std::chrono::high_resolution_clock::now();
-        current_step->io_complete_ts = std::chrono::duration_cast<std::chrono::microseconds>(
+        double ts = std::chrono::duration_cast<std::chrono::microseconds>(
             now - trace_start_time).count();
+        if (current_step != nullptr && current_step->pivot_node_id == node_id) {
+          current_step->io_complete_ts = ts;
+        }
       }
     };
 
@@ -153,7 +160,11 @@ namespace pipeann {
         current_step->logic_neighbors = all_neighbors;
         current_step->neighbor_page_ids.reserve(all_neighbors.size());
         for (uint32_t nbr : all_neighbors) {
-          current_step->neighbor_page_ids.push_back(id2page(nbr));
+          if (nbr < num_points) {
+            current_step->neighbor_page_ids.push_back(id2page(nbr));
+          } else {
+            current_step->neighbor_page_ids.push_back(kInvalidID);
+          }
         }
         current_step->cache_hits = cache_hit_list;
       }
@@ -271,7 +282,7 @@ namespace pipeann {
         id_buf_map.insert(std::make_pair(io.nbr.id, offset_to_loc((char *) io.read_req->buf, io.loc)));
         
         // 追踪 I/O 完成
-        record_io_complete();
+        record_io_complete(io.nbr.id);
         io.nbr.distance <= retset[cur_list_size - 1].distance ? ++n_in : ++n_out;
         // unlock the corresponding page.
         this->unlock_idx(idx_lock_table, io.nbr.id);

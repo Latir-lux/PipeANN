@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <vector>
 #include <string>
 #include <fstream>
@@ -74,14 +75,12 @@ class AccessTracer {
 public:
   bool enabled;
   std::string output_path;
-  std::vector<QueryTrace> traces;
+  std::deque<QueryTrace> traces;
   
   AccessTracer() : enabled(false) {}
   
   AccessTracer(const std::string& path, bool enable = true) 
-    : enabled(enable), output_path(path) {
-    traces.reserve(10000);  // 预分配空间
-  }
+    : enabled(enable), output_path(path) {}
   
   void set_enabled(bool enable) { enabled = enable; }
   bool is_enabled() const { return enabled; }

@@ -376,7 +376,18 @@ namespace pipeann {
       debug_log.flush();
     }
 
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "Creating on_flight_ios queue..." << std::endl;
+      debug_log.flush();
+    }
+    
     std::queue<io_t> on_flight_ios;
+    
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "Defining send_read_req lambda..." << std::endl;
+      debug_log.flush();
+    }
+    
     auto send_read_req = [&](Neighbor &item) -> bool {
       item.flag = false;
 
@@ -404,7 +415,18 @@ namespace pipeann {
       return true;
     };
 
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "send_read_req lambda defined, creating id_buf_map..." << std::endl;
+      debug_log.flush();
+    }
+
     std::unordered_map<unsigned, char *> id_buf_map;
+    
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "id_buf_map created, defining poll_all lambda..." << std::endl;
+      debug_log.flush();
+    }
+    
     auto poll_all = [&]() -> std::pair<int, int> {
       // poll once.
       reader->poll_all(ctx);
@@ -423,6 +445,11 @@ namespace pipeann {
       return std::make_pair(n_in, n_out);
     };
 
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "poll_all lambda defined, defining send_best_read_req..." << std::endl;
+      debug_log.flush();
+    }
+
     auto send_best_read_req = [&](uint32_t n) -> bool {
       // auto io_st = std::chrono::high_resolution_clock::now();
       unsigned n_sent = 0, marker = 0;
@@ -438,6 +465,11 @@ namespace pipeann {
         }
         n_sent += send_read_req(retset[marker]);
       }
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "send_best_read_req lambda defined, defining calc_best_node..." << std::endl;
+      debug_log.flush();
+    }
+
       // auto io_ed = std::chrono::high_resolution_clock::now();
       // stats->io_us += std::chrono::duration_cast<std::chrono::microseconds>(io_ed - io_st).count();
       return n_sent != 0;  // nothing to send.
@@ -472,6 +504,11 @@ namespace pipeann {
       // stats->cpu_us += std::chrono::duration_cast<std::chrono::microseconds>(cpu_ed - cpu_st).count();
     };
 
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "calc_best_node lambda defined, defining get_first_unvisited..." << std::endl;
+      debug_log.flush();
+    }
+
     auto get_first_unvisited = [&]() -> int {
       int ret = -1;
       for (unsigned i = 0; i < cur_list_size; ++i) {
@@ -482,6 +519,11 @@ namespace pipeann {
       }
       return ret;
     };
+
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "get_first_unvisited lambda defined, defining print_state..." << std::endl;
+      debug_log.flush();
+    }
 
     auto print_state = [&]() {
       LOG(INFO) << "cur_list_size: " << cur_list_size;
@@ -495,6 +537,12 @@ namespace pipeann {
         LOG(INFO) << "on_flight_io: " << io.nbr.id << ", " << io.nbr.distance << ", " << io.nbr.flag << ", "
                   << io.page_id << ", " << io.loc << ", " << io.finished();
       }
+    if (trace != nullptr && debug_log.is_open()) {
+      debug_log << "All lambdas defined, starting main search loop..." << std::endl;
+      debug_log << "cur_list_size=" << cur_list_size << ", l_search=" << l_search << std::endl;
+      debug_log.flush();
+    }
+
       usleep(500);
     };
 

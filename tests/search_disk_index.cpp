@@ -17,6 +17,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <fstream>
 #include "linux_aligned_file_reader.h"
 
 #define WARMUP false
@@ -151,6 +152,12 @@ int search_disk_index(int argc, char **argv) {
     auto s = std::chrono::high_resolution_clock::now();
 
     if (search_mode == SearchMode::PIPE_SEARCH) {
+      // 调试日志
+      std::ofstream main_log(\"/home/latir/WorkSpace/PipeANN/log/main_debug.log\", std::ios::app);
+      if (main_log.is_open()) {
+        main_log << \"Starting PIPE_SEARCH, query_num=\" << query_num << \", g_trace_enabled=\" << g_trace_enabled << std::endl;
+      }
+      
 #pragma omp parallel for schedule(dynamic, 1)
       for (int64_t i = 0; i < (int64_t) query_num; i++) {
         // 为每个查询创建追踪对象（如果启用追踪）
@@ -158,13 +165,36 @@ int search_disk_index(int argc, char **argv) {
         if (g_trace_enabled) {
           #pragma omp critical
           {
+            if (main_log.is_open()) {
+              main_log << \"Query \" << i << \": calling new_trace\" << std::endl;
+            }
             trace = g_tracer.new_trace(static_cast<uint32_t>(i));
+            if (main_log.is_open()) {
+              main_log << \"Query \" << i << \": trace pointer = \" << (void*)trace << std::endl;
+            }
+          }
+        }
+        if (main_log.is_open()) {
+          #pragma omp critical
+          {
+            main_log << \"Query \" << i << \": calling pipe_search\" << std::endl;
           }
         }
         _pFlashIndex->pipe_search(query + (i * query_dim), (uint64_t) recall_at, mem_L, (uint64_t) L,
                                   query_result_tags_32.data() + (i * recall_at),
                                   query_result_dists[test_id].data() + (i * recall_at), (uint64_t) beamwidth,
                                   stats + i, trace);
+        if (main_log.is_open()) {
+          #pragma omp critical
+          {
+            main_log << \"Query \" << i << \": pipe_search returned\" << std::endl;
+          }
+        }
+      }
+      
+      if (main_log.is_open()) {
+        main_log << \"PIPE_SEARCH completed\" << std::endl;
+        main_log.close();
       }
     } else if (search_mode == SearchMode::PAGE_SEARCH) {
 #pragma omp parallel for schedule(dynamic, 1)

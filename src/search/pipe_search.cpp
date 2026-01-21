@@ -5,6 +5,7 @@
 #include "access_tracer.h"
 #include <malloc.h>
 #include <algorithm>
+#include <fstream>
 #ifndef USE_AIO
 #include "liburing.h"
 #endif
@@ -97,17 +98,40 @@ namespace pipeann {
     size_t current_step_idx = SIZE_MAX;  // 无效索引
     auto trace_start_time = std::chrono::high_resolution_clock::now();
     
+    // 调试日志
+    std::ofstream debug_log;
+    if (trace != nullptr) {
+      debug_log.open("/home/latir/WorkSpace/PipeANN/log/pipe_search_debug.log", std::ios::app);
+      debug_log << "=== Query start, trace enabled ===" << std::endl;
+      debug_log << "num_points: " << num_points << std::endl;
+    }
+    
     auto start_new_trace_step = [&](uint32_t pivot_id) {
       if (trace != nullptr) {
+        if (debug_log.is_open()) {
+          debug_log << "start_new_trace_step: pivot_id=" << pivot_id << ", steps.size()=" << trace->steps.size() << std::endl;
+        }
         trace->steps.emplace_back();
         current_step_idx = trace->steps.size() - 1;
+        if (debug_log.is_open()) {
+          debug_log << "  after emplace_back: steps.size()=" << trace->steps.size() << ", current_step_idx=" << current_step_idx << std::endl;
+        }
         auto& step = trace->steps[current_step_idx];
         step.step_id = trace_step_id++;
         step.pivot_node_id = pivot_id;
         if (pivot_id < num_points) {
+          if (debug_log.is_open()) {
+            debug_log << "  calling id2page(" << pivot_id << ")..." << std::endl;
+          }
           step.pivot_page_id = id2page(pivot_id);
+          if (debug_log.is_open()) {
+            debug_log << "  id2page returned: " << step.pivot_page_id << std::endl;
+          }
         } else {
           step.pivot_page_id = kInvalidID;
+        }
+        if (debug_log.is_open()) {
+          debug_log << "  step initialized successfully" << std::endl;
         }
       }
     };
@@ -159,12 +183,22 @@ namespace pipeann {
       }
       
       // 启动新的追踪步骤
+      if (trace != nullptr && debug_log.is_open()) {
+        debug_log << "compute_and_push_nbrs: pivot_id=" << pivot_id << ", nnbrs=" << nnbrs << std::endl;
+      }
       start_new_trace_step(pivot_id);
       if (trace != nullptr && current_step_idx < trace->steps.size()) {
+        if (debug_log.is_open()) {
+          debug_log << "  filling neighbor data, all_neighbors.size()=" << all_neighbors.size() << std::endl;
+        }
         auto& step = trace->steps[current_step_idx];
         step.logic_neighbors = all_neighbors;
         step.neighbor_page_ids.reserve(all_neighbors.size());
-        for (uint32_t nbr : all_neighbors) {
+        for (size_t i = 0; i < all_neighbors.size(); ++i) {
+          uint32_t nbr = all_neighbors[i];
+          if (debug_log.is_open() && i < 5) {  // 只记录前5个
+            debug_log << "    neighbor[" << i << "]= " << nbr << std::endl;
+          }
           if (nbr < num_points) {
             step.neighbor_page_ids.push_back(id2page(nbr));
           } else {
@@ -172,6 +206,9 @@ namespace pipeann {
           }
         }
         step.cache_hits = cache_hit_list;
+        if (debug_log.is_open()) {
+          debug_log << "  neighbor data filled successfully" << std::endl;
+        }
       }
 
       n_computes += nbors_cand_size;
@@ -444,10 +481,17 @@ namespace pipeann {
     
     // 完成追踪统计
     if (trace != nullptr) {
+      if (debug_log.is_open()) {
+        debug_log << "Finalizing trace, total steps: " << trace->steps.size() << std::endl;
+      }
       auto trace_end_time = std::chrono::high_resolution_clock::now();
       trace->total_time_us = std::chrono::duration_cast<std::chrono::microseconds>(
           trace_end_time - trace_start_time).count();
       trace->finalize();
+      if (debug_log.is_open()) {
+        debug_log << "Trace finalized successfully" << std::endl;
+        debug_log.close();
+      }
     }
     
     return t;

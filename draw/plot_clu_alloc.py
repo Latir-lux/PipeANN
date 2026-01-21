@@ -38,8 +38,8 @@ except ImportError as e:
 
 # ========== Configuration ==========
 # Directory containing the CSV result files
-RESULT_DIR = Path(__file__).parent.absolute()
-OUTPUT_DIR = RESULT_DIR
+RESULT_DIR = Path("/mnt/xiaoxuanx/dataset/sift/draw")
+OUTPUT_DIR = Path("/mnt/xiaoxuanx/dataset/sift/draw")
 
 # Style configuration
 try:

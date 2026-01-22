@@ -79,8 +79,8 @@ void compare_search_latency(
   
   // 加载查询
   T *query = nullptr;
-  size_t query_num, query_dim, query_aligned_dim;
-  pipeann::load_aligned_bin<T>(query_file, query, query_num, query_dim, query_aligned_dim);
+  size_t query_num, query_dim;
+  pipeann::load_bin<T>(query_file, query, query_num, query_dim);
   
   // 加载groundtruth
   unsigned *gt_ids = nullptr;

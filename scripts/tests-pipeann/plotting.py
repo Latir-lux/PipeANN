@@ -217,7 +217,7 @@ def figure14():
 def figure15():
     raw_data = [process_pipeann("./data/fig11_pipeann.txt"), process_pipeann("./data/fig15_vamana.txt")]
     plot_data = reorganize_data(raw_data)
-    del plot_data["SPACEV"]
+    del plot_data["GIST"]
     f = plot_lat_acc(plot_data, min_recall=0.8, max_lat=3) # shrink min_recall to see the full plot.
     f.savefig("./figures/figure15.png", bbox_inches='tight')
 

@@ -43,14 +43,14 @@ if [ -f "${INDEX_DIR}/deep/100M_disk.index" ]; then
         ${NUM_THREADS} ${BEAM_WIDTH} ${RECALL_AT} ${MEM_L}
 fi
 
-# SPACEV 数据集
-echo "Testing on SPACEV..."
-if [ -f "${INDEX_DIR}/spacev/100M_disk.index" ]; then
-    ./build/tests/thesis_benchmark 1 int8 \
-        ${INDEX_DIR}/spacev/100M \
-        ${DATA_DIR}/SPACEV1B/query.bin \
-        ${DATA_DIR}/SPACEV1B/100M_gt.bin \
-        ${OUTPUT_DIR}/exp1_latency_spacev100m.csv \
+# GIST 数据集
+echo "Testing on GIST..."
+if [ -f "${INDEX_DIR}/gist/1m_disk.index" ]; then
+    ./build/tests/thesis_benchmark 1 uint8 \
+        ${INDEX_DIR}/gist/1m \
+        ${DATA_DIR}/gist/gist_query.bin \
+        ${DATA_DIR}/gist/1M_gt.bin \
+        ${OUTPUT_DIR}/exp1_latency_gist1m.csv \
         ${NUM_THREADS} ${BEAM_WIDTH} ${RECALL_AT} ${MEM_L}
 fi
 

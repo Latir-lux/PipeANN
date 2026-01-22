@@ -42,3 +42,7 @@ target_link_libraries(normalize_data ${PROJECT_NAME})
 # 论文第5章实验测试程序
 add_executable(thesis_benchmark thesis_benchmark.cpp)
 target_link_libraries(thesis_benchmark ${PROJECT_NAME})
+
+# 系统对比测试程序 (DC-PDI vs IP-DiskANN vs FreshDiskANN)
+add_executable(compare_systems compare_systems.cpp)
+target_link_libraries(compare_systems ${PROJECT_NAME})

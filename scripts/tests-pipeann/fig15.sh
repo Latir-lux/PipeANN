@@ -15,4 +15,4 @@ function run_10_mem() {
     scripts/tests/drop_cache
 }
 
-run_10_mem 10 8 5 0 /mnt/nvme2/indices/bigann/100m /mnt/nvme2/indices/spacev/100M /mnt/nvme2/indices/deep/100M | tee ./data/fig15_vamana.txt
+run_10_mem 10 8 5 0 /mnt/nvme2/indices/bigann/100m /mnt/nvme2/indices/gist/1m /mnt/nvme2/indices/deep/100M | tee ./data/fig15_vamana.txt

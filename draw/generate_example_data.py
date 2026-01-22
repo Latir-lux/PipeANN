@@ -20,7 +20,7 @@ def generate_example_data():
     L_values = [10, 20, 30, 40, 50, 60, 80, 100, 150, 200]
     recalls = [0.80, 0.85, 0.88, 0.91, 0.93, 0.945, 0.96, 0.97, 0.98, 0.985]
     
-    for dataset in ['sift100m', 'deep100m', 'spacev100m']:
+    for dataset in ['sift100m', 'deep100m', 'gist1m']:
         data = {
             'L': L_values,
             'recall': recalls,

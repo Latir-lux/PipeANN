@@ -7,9 +7,9 @@ echo "Building +Static version..."
 bash ./build_flags.sh "-DDYN_PIPE_WIDTH -DSTATIC_POLICY"
 
 echo "Running static policy..."
-run_10_100M 10 32 2 10 /mnt/nvme2/indices/bigann/100m /mnt/nvme2/indices/spacev/100M /mnt/nvme2/indices/deep/100M 1 | tee ./data/fig17_static_lat.txt
+run_10_100M 10 32 2 10 /mnt/nvme2/indices/bigann/100m /mnt/nvme2/indices/gist/1m /mnt/nvme2/indices/deep/100M 1 | tee ./data/fig17_static_lat.txt
 
 echo "Running dynamic policy..."
-run_10_100M 10 32 2 10 /mnt/nvme2/indices/bigann/100m /mnt/nvme2/indices/spacev/100M /mnt/nvme2/indices/deep/100M 56 | tee ./data/fig17_static_tput.txt
+run_10_100M 10 32 2 10 /mnt/nvme2/indices/bigann/100m /mnt/nvme2/indices/gist/1m /mnt/nvme2/indices/deep/100M 56 | tee ./data/fig17_static_tput.txt
 
 bash ./build.sh

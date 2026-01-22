@@ -477,6 +477,10 @@ int main(int argc, char **argv) {
       auto mem_index_path = index_prefix + "_mem.index";
       if (file_exists(mem_index_path)) {
         index->load_mem_index(metric, query_dim, mem_index_path);
+        std::cout << "Loaded memory index from " << mem_index_path << std::endl;
+      } else {
+        std::cout << "Warning: Memory index not found, setting mem_L=0" << std::endl;
+        mem_L = 0;  // 内存索引不存在，禁用内存索引搜索
       }
     }
 
@@ -517,6 +521,10 @@ int main(int argc, char **argv) {
       auto mem_index_path = index_prefix + "_mem.index";
       if (file_exists(mem_index_path)) {
         index->load_mem_index(metric, query_dim, mem_index_path);
+        std::cout << "Loaded memory index from " << mem_index_path << std::endl;
+      } else {
+        std::cout << "Warning: Memory index not found, setting mem_L=0" << std::endl;
+        mem_L = 0;  // 内存索引不存在，禁用内存索引搜索
       }
     }
 

@@ -91,8 +91,13 @@ void compare_search_latency(
   // 设置搜索模式
   int search_mode = (system_type == DC_PDI) ? PIPE_SEARCH : BEAM_SEARCH;
   
+  // 创建索引读取器和邻居处理器
+  std::shared_ptr<AlignedFileReader> reader;
+  reader.reset(new LinuxAlignedFileReader());
+  auto nbr_handler = new pipeann::PQNeighbor<T>();
+  
   // 加载索引
-  pipeann::SSDIndex<T, TagT> index(pipeann::L2, index_prefix.c_str(), num_threads, 1, false, search_mode == PIPE_SEARCH);
+  pipeann::SSDIndex<T, TagT> index(pipeann::L2, reader, nbr_handler, false);
   int load_result = index.load(index_prefix.c_str(), num_threads, true, search_mode == PIPE_SEARCH);
   
   if (load_result != 0) {

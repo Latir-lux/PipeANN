@@ -924,7 +924,7 @@ int main(int argc, char **argv) {
         run_topology_strength_experiment(*index, output_file);
         break;
       case 10:
-        run_dispersion_evolution_experiment(*index, nullptr, 0, data_dim, query_f, query_num, query_dim,
+        run_dispersion_evolution_experiment(*index, nullptr, 0, query_dim, query_f, query_num, query_dim,
                                             recall_at, mem_L, 50, beam_width, output_file);
         break;
       case 11:
@@ -984,7 +984,7 @@ int main(int argc, char **argv) {
         run_topology_strength_experiment(*index, output_file);
         break;
       case 10:
-        run_dispersion_evolution_experiment(*index, nullptr, 0, data_dim, query_u8, query_num, query_dim,
+        run_dispersion_evolution_experiment(*index, nullptr, 0, query_dim, query_u8, query_num, query_dim,
                                             recall_at, mem_L, 50, beam_width, output_file);
         break;
       case 11:

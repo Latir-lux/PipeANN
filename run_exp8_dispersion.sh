@@ -7,10 +7,10 @@ set -e
 # 请根据实际情况修改以下路径
 
 # 数据集路径
-INDEX_PREFIX=/mnt/indices/sift1m                    # 索引前缀（不含_disk.index后缀）
-QUERY_FILE=/mnt/data/sift/sift_query.fbin           # 查询文件
-GT_FILE=/mnt/data/sift/sift_groundtruth.bin         # 真值文件
-DATA_TYPE=float                                     # 数据类型: float/uint8/int8
+INDEX_PREFIX=/mnt/xiaoxuanx/dataset/sift                        # 索引前缀（不含_disk.index后缀）
+QUERY_FILE=/mnt/xiaoxuanx/dataset/sift/sift_query.fbin          # 查询文件
+GT_FILE=/mnt/xiaoxuanx/dataset/sift/sift_groundtruth.bin        # 真值文件
+DATA_TYPE=float                                                 # 数据类型: float/uint8/int8
 
 # 实验参数
 NUM_THREADS=32        # 搜索线程数
@@ -25,7 +25,7 @@ OUTPUT_FILE=$OUTPUT_DIR/exp8_dispersion.csv
 
 # ==================== 运行实验 ====================
 
-PROJECT_ROOT=/home/latir/WorkSpace/PipeANN
+PROJECT_ROOT=/home/xiaoxuanx/WorkSpace/PipeANN
 cd $PROJECT_ROOT
 
 echo "=========================================="

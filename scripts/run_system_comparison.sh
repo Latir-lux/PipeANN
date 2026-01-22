@@ -90,11 +90,16 @@ prepare_index() {
   local system_index="${INDEX_BASE}_${system_name}"
   if [ ! -f "${system_index}_disk.index" ]; then
     echo "Copying index for $system_name..." >&2
+    # 主索引文件
     cp ${INDEX_BASE}_disk.index ${system_index}_disk.index
-    cp ${INDEX_BASE}_disk.index_pq_compressed.bin ${system_index}_disk.index_pq_compressed.bin 2>/dev/null || true
-    cp ${INDEX_BASE}_disk.index_pq_pivots.bin ${system_index}_disk.index_pq_pivots.bin 2>/dev/null || true
-    cp ${INDEX_BASE}_disk.index_sample_data.bin ${system_index}_disk.index_sample_data.bin 2>/dev/null || true
-    cp ${INDEX_BASE}_disk.index_page_layout.bin ${system_index}_disk.index_page_layout.bin 2>/dev/null || true
+    # PQ量化文件（注意：文件名格式是 {prefix}_pq_*.bin，不是 {prefix}_disk.index_pq_*.bin）
+    cp ${INDEX_BASE}_pq_compressed.bin ${system_index}_pq_compressed.bin 2>/dev/null || true
+    cp ${INDEX_BASE}_pq_pivots.bin ${system_index}_pq_pivots.bin 2>/dev/null || true
+    # 其他辅助文件
+    cp ${INDEX_BASE}_sample_data.bin ${system_index}_sample_data.bin 2>/dev/null || true
+    cp ${INDEX_BASE}_partition.bin.aligned ${system_index}_partition.bin.aligned 2>/dev/null || true
+    # 标签文件（如果存在）
+    cp ${INDEX_BASE}_disk.index.tags ${system_index}_disk.index.tags 2>/dev/null || true
   fi
   
   echo "[$(date)] Index for $system_name ready: ${system_index}" >&2

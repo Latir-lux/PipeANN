@@ -35,6 +35,8 @@
 #include "partition.h"
 #include "utils.h"
 
+#include <filesystem>
+
 // 系统类型枚举
 enum SystemType {
   DC_PDI = 0,        // DC-PDI: Pipe search + 动态聚类
@@ -77,16 +79,46 @@ void compare_search_latency(
     uint32_t beam_width,
     const std::string &output_file) {
   
+  // 验证文件存在性
+  std::string disk_index_file = index_prefix + "_disk.index";
+  std::string pq_compressed_file = index_prefix + "_pq_compressed.bin";
+  std::string pq_pivots_file = index_prefix + "_pq_pivots.bin";
+  
+  if (!std::filesystem::exists(query_file)) {
+    std::cerr << "Error: Query file not found: " << query_file << std::endl;
+    return;
+  }
+  if (!std::filesystem::exists(gt_file)) {
+    std::cerr << "Error: Ground truth file not found: " << gt_file << std::endl;
+    return;
+  }
+  if (!std::filesystem::exists(disk_index_file)) {
+    std::cerr << "Error: Disk index file not found: " << disk_index_file << std::endl;
+    return;
+  }
+  if (!std::filesystem::exists(pq_compressed_file)) {
+    std::cerr << "Error: PQ compressed file not found: " << pq_compressed_file << std::endl;
+    std::cerr << "Hint: Make sure index files follow naming convention {prefix}_pq_compressed.bin" << std::endl;
+    return;
+  }
+  if (!std::filesystem::exists(pq_pivots_file)) {
+    std::cerr << "Error: PQ pivots file not found: " << pq_pivots_file << std::endl;
+    std::cerr << "Hint: Make sure index files follow naming convention {prefix}_pq_pivots.bin" << std::endl;
+    return;
+  }
+  
   // 加载查询
   T *query = nullptr;
   size_t query_num, query_dim;
   pipeann::load_bin<T>(query_file, query, query_num, query_dim);
+  std::cout << "Loaded " << query_num << " queries with dimension " << query_dim << std::endl;
   
   // 加载groundtruth
   unsigned *gt_ids = nullptr;
   float *gt_dists = nullptr;
   size_t gt_num, gt_dim;
   pipeann::load_truthset(gt_file, gt_ids, gt_dists, gt_num, gt_dim);
+  std::cout << "Loaded groundtruth: " << gt_num << " queries, k=" << gt_dim << std::endl;
   
   // 设置搜索模式
   int search_mode = (system_type == DC_PDI) ? PIPE_SEARCH : BEAM_SEARCH;

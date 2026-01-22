@@ -9,7 +9,7 @@ set -e
 # 数据集路径
 INDEX_PREFIX=/mnt/xiaoxuanx/dataset/sift/sift_index                  # 索引前缀（不含_disk.index后缀）
 QUERY_FILE=/mnt/xiaoxuanx/dataset/sift/sift_query.fbin          # 查询文件
-GT_FILE=/mnt/xiaoxuanx/dataset/sift/sift_groundtruth.bin        # 真值文件
+GT_FILE=/mnt/xiaoxuanx/dataset/sift/sift_groundtruth.ibin        # 真值文件
 DATA_TYPE=float                                                 # 数据类型: float/uint8/int8
 
 # 实验参数

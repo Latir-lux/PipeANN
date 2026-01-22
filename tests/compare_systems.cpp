@@ -105,7 +105,7 @@ void compare_search_latency(
     return;
   }
   
-  std::cout << "Loaded index for " << system_names[system_type] << ", num_points=" << index.get_num_points() << std::endl;
+  std::cout << "Loaded index for " << system_names[system_type] << ", num_points=" << index.num_points << std::endl;
   
   // 输出文件
   std::ofstream ofs(output_file);

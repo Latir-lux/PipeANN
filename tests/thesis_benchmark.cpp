@@ -340,12 +340,87 @@ void run_resource_evaluation(
   std::cout << "Results saved to " << output_file << std::endl;
 }
 
+/**
+ * 实验8: DC-PDI物理离散度评估 (论文3.2节)
+ * 测量搜索过程中的页内边比例和物理离散度
+ */
+template<typename T, typename TagT = uint32_t>
+void run_dispersion_experiment(
+    pipeann::SSDIndex<T, TagT>& index,
+    T* query,
+    size_t query_num,
+    size_t query_dim,
+    uint64_t recall_at,
+    uint32_t mem_L,
+    uint64_t L,
+    uint32_t beam_width,
+    const std::string& output_file) {
+  
+  TagT* query_result_tags = new TagT[recall_at * query_num];
+  float* query_result_dists = new float[recall_at * query_num];
+  pipeann::QueryStats* stats = new pipeann::QueryStats[query_num];
+  
+#pragma omp parallel for num_threads(NUM_SEARCH_THREADS) schedule(dynamic, 1)
+  for (int64_t i = 0; i < (int64_t)query_num; i++) {
+    index.pipe_search(query + (i * query_dim), recall_at, mem_L, L,
+                      query_result_tags + (i * recall_at),
+                      query_result_dists + (i * recall_at),
+                      beam_width, stats + i);
+  }
+  
+  // 汇总物理离散度统计
+  double total_dispersion = 0, total_local_ratio = 0;
+  uint64_t total_sampled = 0;
+  for (size_t i = 0; i < query_num; i++) {
+    total_dispersion += stats[i].physical_dispersion;
+    total_local_ratio += stats[i].page_local_edge_ratio;
+    total_sampled += stats[i].sampled_nodes;
+  }
+  
+  double avg_dispersion = total_sampled > 0 ? total_dispersion / total_sampled : 0;
+  double avg_local_ratio = query_num > 0 ? total_local_ratio / query_num : 0;
+  
+  std::ofstream ofs(output_file);
+  ofs << "metric,value\n";
+  ofs << "avg_physical_dispersion," << avg_dispersion << "\n";
+  ofs << "avg_page_local_edge_ratio," << avg_local_ratio << "\n";
+  ofs << "total_sampled_nodes," << total_sampled << "\n";
+  ofs << "total_queries," << query_num << "\n";
+
+#ifdef ENABLE_DISPERSION_MONITOR
+  // 保存详细的页面离散度分布
+  auto global_stats = index.get_dispersion_monitor().get_global_stats();
+  ofs << "global_total_pages," << global_stats.total_pages << "\n";
+  ofs << "global_fragmented_pages," << global_stats.fragmented_pages << "\n";
+  ofs << "global_avg_fragmentation," << global_stats.avg_fragmentation << "\n";
+  
+  // 保存页面级别的详细统计
+  std::string detail_file = output_file + ".pages.csv";
+  index.get_dispersion_monitor().save_to_csv(detail_file);
+  std::cout << "Page-level details saved to " << detail_file << std::endl;
+#endif
+  
+  ofs.close();
+  
+  std::cout << "=== Physical Dispersion Results ===" << std::endl;
+  std::cout << "Avg Physical Dispersion: " << avg_dispersion << std::endl;
+  std::cout << "Avg Page-Local Edge Ratio: " << (avg_local_ratio * 100) << "%" << std::endl;
+  std::cout << "Results saved to " << output_file << std::endl;
+  
+  delete[] query_result_tags;
+  delete[] query_result_dists;
+  delete[] stats;
+}
+
 void print_usage(const char* prog) {
   std::cout << "Usage: " << prog << " <experiment_type> <data_type> <index_prefix> <query_file> "
             << "<truthset_file> <output_file> [options...]\n\n"
             << "Experiment types:\n"
             << "  1 - Latency distribution (5.2.1)\n"
             << "  5 - I/O amplification (5.4.1)\n"
+            << "  6 - Pipeline width sensitivity (5.5.1)\n"
+            << "  7 - Resource evaluation (5.5.3)\n"
+            << "  8 - DC-PDI Physical dispersion (3.2)\n""
             << "  6 - Pipeline width sensitivity (5.5.1)\n"
             << "  7 - Resource evaluation (5.5.3)\n"
             << std::endl;
@@ -446,6 +521,10 @@ int main(int argc, char** argv) {
       case 7:
         run_resource_evaluation<float>(index_prefix, index->num_points, query_dim, output_file);
         break;
+      case 8:
+        run_dispersion_experiment(*index, query_f, query_num, query_dim,
+                                   recall_at, mem_L, 50, beam_width, output_file);
+        break;
       default:
         std::cout << "Unknown experiment type: " << exp_type << std::endl;
         return -1;
@@ -484,6 +563,10 @@ int main(int argc, char** argv) {
       }
       case 7:
         run_resource_evaluation<uint8_t>(index_prefix, index->num_points, query_dim, output_file);
+        break;
+      case 8:
+        run_dispersion_experiment(*index, query_u8, query_num, query_dim,
+                                   recall_at, mem_L, 50, beam_width, output_file);
         break;
       default:
         std::cout << "Unknown experiment type: " << exp_type << std::endl;

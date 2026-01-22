@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <limits>
 #include <tuple>
+#include <unordered_map>
 #include "utils/timer.h"
 #include "utils/tsl/robin_map.h"
 #include "utils.h"
@@ -19,6 +20,10 @@
 #include <unistd.h>
 #include <sys/syscall.h>
 #include "linux_aligned_file_reader.h"
+
+#ifdef ENABLE_BLOCK_AWARE_PRUNE
+#include "utils/clustering.h"
+#endif
 
 namespace pipeann {
   template<typename T, typename TagT>
@@ -47,7 +52,34 @@ namespace pipeann {
     this->do_beam_search(point1, 0, l_index, beam_width, exp_node_info, &coord_map, coord_buf, nullptr, deletion_set,
                          false, &page_ref);
     std::vector<uint32_t> new_nhood;
+    
+    // DC-PDI: 使用块感知剪枝（论文4.2节）
+    // 确定目标页面（使用连接强度最高的页面）
+#ifdef ENABLE_BLOCK_AWARE_PRUNE
+    uint64_t target_page = 0;
+    if (!page_ref.empty()) {
+      // 计算各页面的连接强度并选择最优页面
+      std::unordered_map<uint64_t, float> page_strength;
+      constexpr float kDistanceDecay = 1.5f;
+      for (auto& nbr : exp_node_info) {
+        uint64_t page = node_sector_no(nbr.id);
+        float dist = std::max(nbr.distance, 1e-6f);
+        page_strength[page] += 1.0f / std::pow(dist, kDistanceDecay);
+      }
+      float max_strength = 0;
+      for (auto& [page, strength] : page_strength) {
+        if (strength > max_strength) {
+          max_strength = strength;
+          target_page = page;
+        }
+      }
+      prune_neighbors_block_aware(coord_map, exp_node_info, new_nhood, target_page);
+    } else {
+      prune_neighbors(coord_map, exp_node_info, new_nhood);
+    }
+#else
     prune_neighbors(coord_map, exp_node_info, new_nhood);
+#endif
     // locs[new_nhood.size()] is the target, locs[0:new_nhood.size() - 1] are the neighbors.
     // lock the pages to write
     aligned_free(coord_buf);
@@ -68,7 +100,22 @@ namespace pipeann {
     cur_loc++;  // for target ID, atomic update.
     set_loc2id(target_id, target_id);
 #else
-    auto locs = this->alloc_loc(new_nhood.size() + 1, page_ref, pages_need_to_read);
+    // DC-PDI: 使用聚类感知位置分配（论文3.2节）
+    // 根据邻居的距离计算连接强度，选择最优页面
+    std::vector<float> neighbor_dists;
+    neighbor_dists.reserve(new_nhood.size());
+    for (auto& nbr_id : new_nhood) {
+      // 从exp_node_info中找到对应邻居的距离
+      float dist = std::numeric_limits<float>::max();
+      for (auto& info : exp_node_info) {
+        if (info.id == nbr_id) {
+          dist = info.distance;
+          break;
+        }
+      }
+      neighbor_dists.push_back(dist);
+    }
+    auto locs = this->alloc_loc_clustering_aware(new_nhood.size() + 1, new_nhood, neighbor_dists, pages_need_to_read);
 #endif
 
     std::set<uint64_t> pages_to_rmw_set;

@@ -20,6 +20,10 @@
 #include <sys/syscall.h>
 #include "linux_aligned_file_reader.h"
 
+#ifdef ENABLE_BLOCK_AWARE_PRUNE
+#include "utils/clustering.h"
+#endif
+
 namespace pipeann {
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::occlude_list(std::vector<Neighbor> &pool, const tsl::robin_map<uint32_t, T *> &coord_map,
@@ -233,6 +237,125 @@ namespace pipeann {
           pruned_list.emplace_back(pool[i].id);
         }
       }
+    }
+  }
+
+  /**
+   * DC-PDI: 块感知邻居剪枝（论文4.2节）
+   * 
+   * 对跨页边应用惩罚系数，优先保留页内边
+   * d'(v_new, u) = d(v_new, u) * β  if Page(u) ≠ Page(v_new)
+   *              = d(v_new, u)      otherwise
+   */
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::prune_neighbors_block_aware(
+      const tsl::robin_map<uint32_t, T*>& coord_map,
+      std::vector<Neighbor>& pool,
+      std::vector<uint32_t>& pruned_list,
+      uint64_t target_page) {
+    
+    if (pool.empty()) return;
+    
+    // 跨页惩罚系数
+    constexpr float kCrossPagePenalty = 1.5f;
+    
+    // 应用块感知惩罚调整距离
+    std::vector<float> original_distances(pool.size());
+    for (size_t i = 0; i < pool.size(); i++) {
+      original_distances[i] = pool[i].distance;
+      uint64_t nbr_page = node_sector_no(pool[i].id);
+      if (nbr_page != target_page) {
+        pool[i].distance *= kCrossPagePenalty;
+      }
+    }
+    
+    // 重新排序
+    std::sort(pool.begin(), pool.end());
+    
+    // 使用原有剪枝逻辑
+    std::vector<Neighbor> result;
+    result.reserve(range);
+    std::vector<float> occlude_factor(pool.size(), 0);
+    occlude_list(pool, coord_map, result, occlude_factor);
+    
+    pruned_list.clear();
+    
+    // 恢复原始距离并填充结果
+    size_t medoid_threshold = result.size() * 3 / 4;
+    for (size_t i = 0; i < result.size(); ++i) {
+      if (i > medoid_threshold && result[i].id == medoid) {
+        continue;
+      }
+      pruned_list.emplace_back(result[i].id);
+    }
+    
+    // 填充到range
+    if (alpha > 1) {
+      for (uint32_t i = 0; i < pool.size() && pruned_list.size() < range; i++) {
+        if (std::find(pruned_list.begin(), pruned_list.end(), pool[i].id) == pruned_list.end()) {
+          pruned_list.emplace_back(pool[i].id);
+        }
+      }
+    }
+    
+    // 恢复pool中的原始距离（以便调用者使用）
+    for (size_t i = 0; i < pool.size() && i < original_distances.size(); i++) {
+      pool[i].distance = original_distances[i];
+    }
+  }
+
+  /**
+   * DC-PDI: 块感知PQ邻居剪枝（论文4.2节）
+   */
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::prune_neighbors_pq_block_aware(
+      std::vector<Neighbor>& pool,
+      std::vector<uint32_t>& pruned_list,
+      uint8_t* scratch,
+      uint64_t target_page) {
+    
+    if (pool.empty()) return;
+    
+    // 跨页惩罚系数
+    constexpr float kCrossPagePenalty = 1.5f;
+    
+    // 保存原始距离并应用惩罚
+    std::vector<float> original_distances(pool.size());
+    for (size_t i = 0; i < pool.size(); i++) {
+      original_distances[i] = pool[i].distance;
+      uint64_t nbr_page = node_sector_no(pool[i].id);
+      if (nbr_page != target_page) {
+        pool[i].distance *= kCrossPagePenalty;
+      }
+    }
+    
+    // 重新排序
+    std::sort(pool.begin(), pool.end());
+    
+    // 使用原有PQ剪枝逻辑
+    std::vector<Neighbor> result;
+    result.reserve(this->range);
+    std::vector<float> occlude_factor(pool.size(), 0);
+    
+    occlude_list_pq(pool, result, occlude_factor, scratch);
+    
+    pruned_list.clear();
+    assert(result.size() <= range);
+    for (auto iter : result) {
+      pruned_list.emplace_back(iter.id);
+    }
+    
+    if (alpha > 1) {
+      for (uint32_t i = 0; i < pool.size() && pruned_list.size() < range; i++) {
+        if (std::find(pruned_list.begin(), pruned_list.end(), pool[i].id) == pruned_list.end()) {
+          pruned_list.emplace_back(pool[i].id);
+        }
+      }
+    }
+    
+    // 恢复原始距离
+    for (size_t i = 0; i < pool.size() && i < original_distances.size(); i++) {
+      pool[i].distance = original_distances[i];
     }
   }
 

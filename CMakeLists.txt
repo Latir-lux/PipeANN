@@ -7,6 +7,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(USE_AIO "Use AIO instead of liburing" OFF)
 
+# DC-PDI: 动态聚类感知存储分配相关选项
+option(ENABLE_BLOCK_AWARE_PRUNE "Enable block-aware neighbor pruning (Chapter 4.2)" ON)
+option(ENABLE_DISPERSION_MONITOR "Enable physical dispersion monitoring (Chapter 3.3)" ON)
+option(COLLECT_IO_STATS "Enable I/O statistics collection for experiments" OFF)
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # set(CMAKE_C_COMPILER_LAUNCHER ccache)
 # set(CMAKE_CXX_COMPILER_LAUNCHER ccache)
@@ -59,6 +64,22 @@ if(USE_AIO)
 else()
 	message(STATUS "Using liburing for asynchronous I/O, faster but requires kernel support.")
 	link_libraries(uring)
+endif()
+
+# DC-PDI: 添加编译定义
+if(ENABLE_BLOCK_AWARE_PRUNE)
+	message(STATUS "Enabling block-aware neighbor pruning (DC-PDI Chapter 4.2)")
+	add_definitions(-DENABLE_BLOCK_AWARE_PRUNE)
+endif()
+
+if(ENABLE_DISPERSION_MONITOR)
+	message(STATUS "Enabling physical dispersion monitoring (DC-PDI Chapter 3.3)")
+	add_definitions(-DENABLE_DISPERSION_MONITOR)
+endif()
+
+if(COLLECT_IO_STATS)
+	message(STATUS "Enabling I/O statistics collection")
+	add_definitions(-DCOLLECT_IO_STATS)
 endif()
 
 # Use tcmalloc, as jemalloc does not support python (static TLS block).

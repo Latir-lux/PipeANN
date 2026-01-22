@@ -38,6 +38,11 @@ namespace pipeann {
     double io_amplification = 0;   // I/O放大率
     double page_utilization = 0;   // 页面利用率(%)
     
+    // DC-PDI: 物理离散度相关 (论文3.2节)
+    double physical_dispersion = 0;     // 平均物理离散度（跨页邻居数）
+    double page_local_edge_ratio = 0;   // 页内边比例 (0.0-1.0)
+    uint32_t sampled_nodes = 0;         // 采样节点数
+    
     // 计算I/O放大率
     void calc_io_amplification() {
       if (effective_bytes > 0) {

@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <iostream>
 #include "aligned_file_reader.h"
 #include "liburing.h"
@@ -84,7 +85,18 @@ void *LinuxAlignedFileReader::get_ctx(int flag) {
 void LinuxAlignedFileReader::register_thread(int flag) {
   if (ioctx::ring == nullptr) {
     ioctx::ring = new io_uring();
-    io_uring_queue_init(MAX_EVENTS, ioctx::ring, flag);
+    int ret = io_uring_queue_init(MAX_EVENTS, ioctx::ring, flag);
+    if (ret < 0 && flag != 0) {
+      LOG(WARNING) << "io_uring_queue_init failed with flags=" << flag
+                   << ", retrying without flags. Error: " << std::strerror(-ret);
+      ret = io_uring_queue_init(MAX_EVENTS, ioctx::ring, 0);
+    }
+    if (ret < 0) {
+      LOG(ERROR) << "io_uring_queue_init failed. Error: " << std::strerror(-ret);
+      delete ioctx::ring;
+      ioctx::ring = nullptr;
+      crash();
+    }
   }
 }
 

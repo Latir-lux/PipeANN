@@ -304,9 +304,27 @@ template<typename T, typename TagT = uint32_t>
 void run_dispersion_experiment(pipeann::SSDIndex<T, TagT> &index, T *query, size_t query_num, size_t query_dim,
                                uint64_t recall_at, uint32_t mem_L, uint64_t L, uint32_t beam_width,
                                const std::string &output_file) {
+  // 验证输入参数
+  if (query == nullptr) {
+    std::cerr << "Error: query is nullptr" << std::endl;
+    return;
+  }
+  if (query_num == 0 || query_dim == 0) {
+    std::cerr << "Error: invalid query dimensions: query_num=" << query_num << ", query_dim=" << query_dim << std::endl;
+    return;
+  }
+  
+  std::cout << "Running dispersion experiment with " << query_num << " queries, dim=" << query_dim << std::endl;
+  std::cout << "Parameters: recall_at=" << recall_at << ", mem_L=" << mem_L << ", L=" << L << ", beam_width=" << beam_width << std::endl;
+  
   TagT *query_result_tags = new TagT[recall_at * query_num];
   float *query_result_dists = new float[recall_at * query_num];
   pipeann::QueryStats *stats = new pipeann::QueryStats[query_num];
+  
+  // 初始化stats数组，避免未定义行为
+  for (size_t i = 0; i < query_num; i++) {
+    stats[i] = pipeann::QueryStats();  // 使用默认初始化
+  }
 
 #pragma omp parallel for num_threads(NUM_SEARCH_THREADS) schedule(dynamic, 1)
   for (int64_t i = 0; i < (int64_t) query_num; i++) {
@@ -414,15 +432,31 @@ int main(int argc, char **argv) {
   // 根据数据类型加载
   if (data_type == "float") {
     pipeann::load_bin<float>(query_file, query_f, query_num, query_dim);
+    if (query_f == nullptr || query_num == 0) {
+      std::cerr << "Error: Failed to load query file: " << query_file << std::endl;
+      return -1;
+    }
+    std::cout << "Loaded " << query_num << " queries with dimension " << query_dim << std::endl;
   } else if (data_type == "uint8") {
     pipeann::load_bin<uint8_t>(query_file, query_u8, query_num, query_dim);
+    if (query_u8 == nullptr || query_num == 0) {
+      std::cerr << "Error: Failed to load query file: " << query_file << std::endl;
+      return -1;
+    }
+    std::cout << "Loaded " << query_num << " queries with dimension " << query_dim << std::endl;
   } else if (data_type == "int8") {
     pipeann::load_bin<int8_t>(query_file, query_i8, query_num, query_dim);
+    if (query_i8 == nullptr || query_num == 0) {
+      std::cerr << "Error: Failed to load query file: " << query_file << std::endl;
+      return -1;
+    }
+    std::cout << "Loaded " << query_num << " queries with dimension " << query_dim << std::endl;
   }
 
   // 加载ground truth
   if (file_exists(truthset_file)) {
     pipeann::load_truthset(truthset_file, gt_ids, gt_dists, gt_num, gt_dim);
+    std::cout << "Loaded ground truth: " << gt_num << " entries" << std::endl;
   }
 
   // 创建索引读取器

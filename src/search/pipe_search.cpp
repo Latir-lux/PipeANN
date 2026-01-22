@@ -95,10 +95,32 @@ namespace pipeann {
     };
 
     uint64_t n_computes = 0;
-    auto compute_and_push_nbrs = [&](const char *node_buf, unsigned &nk) {
+    auto compute_and_push_nbrs = [&](const char *node_buf, unsigned &nk, unsigned current_node_id) {
       unsigned *node_nbrs = offset_to_node_nhood(node_buf);
       unsigned nnbrs = *(node_nbrs++);
       unsigned nbors_cand_size = 0;
+      
+      // DC-PDI: 统计物理离散度
+      if (stats != nullptr && nnbrs > 0) {
+        unsigned cross_page_neighbors = 0;
+        unsigned current_page = loc_sector_no(id2loc(current_node_id));
+        
+        for (unsigned m = 0; m < nnbrs; ++m) {
+          unsigned nbr_id = node_nbrs[m];
+          unsigned nbr_page = loc_sector_no(id2loc(nbr_id));
+          if (nbr_page != current_page) {
+            cross_page_neighbors++;
+          }
+        }
+        
+        // 累积物理离散度统计
+        stats->physical_dispersion += cross_page_neighbors;
+        stats->sampled_nodes++;
+        if (nnbrs > 0) {
+          stats->page_local_edge_ratio += (double)(nnbrs - cross_page_neighbors) / nnbrs;
+        }
+      }
+      
       for (unsigned m = 0; m < nnbrs; ++m) {
         if (visited.find(node_nbrs[m]) == visited.end()) {
           node_nbrs[nbors_cand_size++] = node_nbrs[m];
@@ -159,6 +181,10 @@ namespace pipeann {
       stats->compute_phase_us = 0;
       stats->bytes_read = 0;
       stats->effective_bytes = 0;
+      // DC-PDI: 物理离散度统计初始化
+      stats->physical_dispersion = 0;
+      stats->page_local_edge_ratio = 0;
+      stats->sampled_nodes = 0;
     }
     // search in in-memory index.
 
@@ -267,7 +293,7 @@ namespace pipeann {
           auto it = id_buf_map.find(retset[marker].id);
           auto [id, buf] = *it;
           compute_exact_dists_and_push(buf, id);
-          compute_and_push_nbrs(buf, nk);
+          compute_and_push_nbrs(buf, nk, id);  // 添加node id参数
           break;
         }
       }

@@ -95,6 +95,9 @@ ExperimentResult run_search_benchmark(
     uint32_t beam_width, const std::string& strategy_name,
     uint64_t num_inserted) {
   
+  LOG(INFO) << "Starting search benchmark: " << query_num << " queries, recall@" << recall_at 
+            << ", L=" << L << ", beam_width=" << beam_width;
+  
   ExperimentResult result;
   result.strategy_name = strategy_name;
   result.num_inserted = num_inserted;
@@ -123,6 +126,8 @@ ExperimentResult run_search_benchmark(
   }
   
   auto e = std::chrono::high_resolution_clock::now();
+  std::chrono::duration<double> elapsed = e - s;
+  LOG(INFO) << "Search completed in " << elapsed.count() << " seconds";
   
   // Calculate APA (Average Page Accesses)
   double total_ios = 0;
@@ -181,15 +186,42 @@ void insertion_kernel(T* data_load, pipeann::DynamicSSDIndex<T, TagT>& sync_inde
 }
 
 template<typename T, typename TagT>
-void get_insertion_data(const std::string& data_bin, uint64_t start_idx, uint64_t count,
-                        std::vector<TagT>& insert_tags, std::vector<T>& data_load) {
+bool get_insertion_data(const std::string& data_bin, uint64_t start_idx, uint64_t count,
+                        std::vector<TagT>& insert_tags, std::vector<T>& data_load, size_t& data_dim) {
   int npts_i32, dim_i32;
-  std::ifstream reader(data_bin, std::ios::binary | std::ios::ate);
-  reader.seekg(0, reader.beg);
+  std::ifstream reader(data_bin, std::ios::binary);
+  if (!reader.is_open()) {
+    LOG(ERROR) << "Failed to open data file: " << data_bin;
+    return false;
+  }
+  
   reader.read((char*)&npts_i32, sizeof(int));
   reader.read((char*)&dim_i32, sizeof(int));
   
-  size_t data_dim = dim_i32;
+  data_dim = dim_i32;
+  size_t total_pts = npts_i32;
+  
+  LOG(INFO) << "Data file: " << data_bin << " has " << total_pts << " points, dim=" << data_dim;
+  
+  // Check if we have enough data
+  if (start_idx >= total_pts) {
+    LOG(ERROR) << "Start index " << start_idx << " exceeds data file size " << total_pts;
+    reader.close();
+    return false;
+  }
+  
+  // Adjust count if it exceeds available data
+  uint64_t available = total_pts - start_idx;
+  if (count > available) {
+    LOG(WARNING) << "Requested " << count << " vectors but only " << available << " available. Adjusting.";
+    count = available;
+  }
+  
+  if (count == 0) {
+    LOG(WARNING) << "No data to insert";
+    reader.close();
+    return false;
+  }
   
   for (uint64_t i = start_idx; i < start_idx + count; ++i) {
     insert_tags.push_back(i);
@@ -198,7 +230,16 @@ void get_insertion_data(const std::string& data_bin, uint64_t start_idx, uint64_
   data_load.resize(count * data_dim);
   reader.seekg(2 * sizeof(int) + start_idx * data_dim * sizeof(T), reader.beg);
   reader.read((char*)data_load.data(), sizeof(T) * count * data_dim);
+  
+  if (!reader) {
+    LOG(ERROR) << "Failed to read data from file";
+    reader.close();
+    return false;
+  }
+  
   reader.close();
+  LOG(INFO) << "Loaded " << count << " vectors starting from index " << start_idx;
+  return true;
 }
 
 template<typename T, typename TagT>
@@ -254,6 +295,9 @@ void run_experiment(const std::string& data_bin, const unsigned L_disk,
                                                   recall_at, search_mem_L, L_search,
                                                   search_beam_width, strategy_name, 0);
   csv_file << result.to_csv_row() << std::endl;
+  csv_file.flush();
+  LOG(INFO) << "Initial benchmark: APA=" << result.avg_page_accesses 
+            << ", P99=" << result.p99_latency_ms << "ms";
   
   // Phase 2: Insert data in steps
   uint64_t total_inserted = 0;
@@ -262,13 +306,19 @@ void run_experiment(const std::string& data_bin, const unsigned L_disk,
     
     std::vector<TagT> insert_tags;
     std::vector<T> insert_data;
+    size_t data_dim_check = 0;
     
     uint64_t start_idx = index_npts + step * vecs_per_step;
-    get_insertion_data<T, TagT>(data_bin, start_idx, vecs_per_step, insert_tags, insert_data);
+    bool success = get_insertion_data<T, TagT>(data_bin, start_idx, vecs_per_step, insert_tags, insert_data, data_dim_check);
+    
+    if (!success || insert_tags.empty()) {
+      LOG(WARNING) << "No more data to insert at step " << step << ". Ending experiment early.";
+      break;
+    }
     
     // Perform insertions
     insertion_kernel(insert_data.data(), sync_index, insert_tags, query_dim);
-    total_inserted += vecs_per_step;
+    total_inserted += insert_tags.size();
     
     // Run search benchmark after this step
     LOG(INFO) << "Running search benchmark after " << total_inserted << " insertions...";

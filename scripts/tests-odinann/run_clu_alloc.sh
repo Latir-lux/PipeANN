@@ -9,6 +9,16 @@
 #
 # ========== DATA PATH CONFIGURATION ==========
 # MODIFY THESE PATHS TO MATCH YOUR ENVIRONMENT:
+#
+# IMPORTANT: The data file must have MORE vectors than the index!
+# For example, if the index contains 500K vectors, the data file
+# should contain at least 500K + (VECS_PER_STEP * NUM_STEPS) vectors.
+#
+# Example setup for SIFT1M:
+#   - Build index with first 500K vectors
+#   - Data file contains 1M vectors total
+#   - Insert remaining 500K vectors in steps
+#
 
 # Data files
 DATA_BIN="/mnt/xiaoxuanx/dataset/sift/sift_base.fbin"    # Binary data file for insertion
@@ -24,8 +34,8 @@ OUTPUT_DIR="/mnt/xiaoxuanx/dataset/sift/draw"
 # Experiment parameters
 TYPE="float"           # Data type: int8, uint8, or float
 L_DISK=128             # L parameter for disk index
-VECS_PER_STEP=1000000  # 1M vectors per step
-NUM_STEPS=10           # 10 steps = 10M total insertions
+VECS_PER_STEP=50000    # 50K vectors per step (adjusted for smaller datasets)
+NUM_STEPS=10           # 10 steps = 500K total insertions
 INSERT_THREADS=10      # Number of insertion threads
 SEARCH_THREADS=32      # Number of search threads
 SEARCH_MODE=0          # 0=BEAM_SEARCH, 1=PAGE_SEARCH, 2=PIPE_SEARCH

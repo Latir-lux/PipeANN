@@ -6,7 +6,7 @@ set -e  # 遇到错误立即退出
 
 # ==================== 配置区 ====================
 
-PROJECT_ROOT=/home/latir/WorkSpace/PipeANN
+PROJECT_ROOT=/home/xiaoxuanx/WorkSpace/PipeANN
 RESULTS_DIR=$PROJECT_ROOT/results
 DRAW_DIR=$PROJECT_ROOT/draw
 
@@ -14,7 +14,7 @@ DRAW_DIR=$PROJECT_ROOT/draw
 if [ $# -ge 1 ]; then
     DATA_ROOT=$1
 else
-    DATA_ROOT=/mnt/data
+    DATA_ROOT=/mnt/xiaoxuanx/dataset
 fi
 
 # 数据集选择（根据实际情况修改）
@@ -24,9 +24,9 @@ DATA_TYPE=float           # 数据类型: float, uint8, int8
 # 根据数据集设置路径
 case $DATASET_NAME in
     sift1m)
-        INDEX_PREFIX=$DATA_ROOT/indices/sift1m
+        INDEX_PREFIX=$DATA_ROOT/sift/sift_index
         QUERY_FILE=$DATA_ROOT/sift/sift_query.fbin
-        GT_FILE=$DATA_ROOT/sift/sift_groundtruth.bin
+        GT_FILE=$DATA_ROOT/sift/sift_groundtruth.ibin
         DATA_TYPE=float
         ;;
     sift100m)

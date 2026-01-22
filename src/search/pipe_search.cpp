@@ -17,6 +17,10 @@
 #include "utils.h"
 #include "utils/page_cache.h"
 
+#ifdef COLLECT_IO_STATS
+#include "utils/io_stats.h"
+#endif
+
 #include <unistd.h>
 #include <sys/syscall.h>
 
@@ -104,7 +108,7 @@ namespace pipeann {
 
       n_computes += nbors_cand_size;
       if (nbors_cand_size) {
-        // auto cpu1_st = std::chrono::high_resolution_clock::now();
+        auto compute_st = std::chrono::high_resolution_clock::now();
         nbr_handler->compute_dists(query_buf, node_nbrs, nbors_cand_size);
         for (unsigned m = 0; m < nbors_cand_size; ++m) {
           const int nbor_id = node_nbrs[m];
@@ -128,8 +132,10 @@ namespace pipeann {
           if (r < nk)
             nk = r;
         }
-        // auto cpu1_ed = std::chrono::high_resolution_clock::now();
-        // stats->cpu_us1 += std::chrono::duration_cast<std::chrono::microseconds>(cpu1_ed - cpu1_st).count();
+        auto compute_ed = std::chrono::high_resolution_clock::now();
+        if (stats != nullptr) {
+          stats->compute_phase_us += std::chrono::duration_cast<std::chrono::microseconds>(compute_ed - compute_st).count();
+        }
       }
     };
 
@@ -147,6 +153,12 @@ namespace pipeann {
       stats->cpu_us = 0;
       stats->cpu_us1 = 0;
       stats->cpu_us2 = 0;
+      // 论文第5章实验新增统计
+      stats->search_phase_us = 0;
+      stats->prefetch_phase_us = 0;
+      stats->compute_phase_us = 0;
+      stats->bytes_read = 0;
+      stats->effective_bytes = 0;
     }
     // search in in-memory index.
 
@@ -178,6 +190,7 @@ namespace pipeann {
 
     std::queue<io_t> on_flight_ios;
     auto send_read_req = [&](Neighbor &item) -> bool {
+      auto prefetch_start = std::chrono::high_resolution_clock::now();
       item.flag = false;
 
       // lock the corresponding page.
@@ -196,7 +209,14 @@ namespace pipeann {
 
       if (stats != nullptr) {
         stats->n_ios++;
+        stats->bytes_read += size_per_io;  // 记录实际读取字节数
+        stats->effective_bytes += max_node_len;  // 记录有效数据字节数
+        auto prefetch_end = std::chrono::high_resolution_clock::now();
+        stats->prefetch_phase_us += std::chrono::duration_cast<std::chrono::microseconds>(prefetch_end - prefetch_start).count();
       }
+#ifdef COLLECT_IO_STATS
+      global_io_stats.add_read(size_per_io, max_node_len);
+#endif
       return true;
     };
 
@@ -339,7 +359,14 @@ namespace pipeann {
     if (stats != nullptr) {
       stats->cpu_us2 = std::chrono::duration_cast<std::chrono::microseconds>(cpu2_ed - cpu2_st).count();
       stats->cpu_us = n_computes;
+      stats->search_phase_us = stats->cpu_us2;  // 搜索阶段包含整个主循环
+      // 计算I/O放大率和重叠率
+      stats->calc_io_amplification();
+      stats->calc_overlap_ratio();
     }
+#ifdef COLLECT_IO_STATS
+    global_io_stats.add_query();
+#endif
     std::sort(full_retset.begin(), full_retset.end(),
               [](const Neighbor &left, const Neighbor &right) { return left < right; });
 

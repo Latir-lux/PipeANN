@@ -38,3 +38,7 @@ target_link_libraries(pad_partition ${PROJECT_NAME} )
 
 add_executable(normalize_data normalize_data.cpp)
 target_link_libraries(normalize_data ${PROJECT_NAME})
+
+# 论文第5章实验测试程序
+add_executable(thesis_benchmark thesis_benchmark.cpp)
+target_link_libraries(thesis_benchmark ${PROJECT_NAME})

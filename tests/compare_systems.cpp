@@ -181,7 +181,7 @@ void compare_search_latency(
   }
   
   ofs.close();
-  aligned_free(query);
+  delete[] query;
   delete[] gt_ids;
   delete[] gt_dists;
 }

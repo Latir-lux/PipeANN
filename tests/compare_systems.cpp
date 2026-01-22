@@ -122,6 +122,8 @@ void compare_search_latency(
   
   // 设置搜索模式
   int search_mode = (system_type == DC_PDI) ? PIPE_SEARCH : BEAM_SEARCH;
+  // 注意：只有 PAGE_SEARCH (Starling) 需要使用 page layout，BEAM_SEARCH 和 PIPE_SEARCH 都不需要
+  bool use_page_search = false;  // DC-PDI和IP-DiskANN都不使用page search
   
   // 创建索引读取器和邻居处理器
   std::shared_ptr<AlignedFileReader> reader;
@@ -130,7 +132,7 @@ void compare_search_latency(
   
   // 加载索引
   pipeann::SSDIndex<T, TagT> index(pipeann::L2, reader, nbr_handler, false);
-  int load_result = index.load(index_prefix.c_str(), num_threads, true, search_mode == PIPE_SEARCH);
+  int load_result = index.load(index_prefix.c_str(), num_threads, true, use_page_search);
   
   if (load_result != 0) {
     std::cerr << "Failed to load index for " << system_names[system_type] << std::endl;

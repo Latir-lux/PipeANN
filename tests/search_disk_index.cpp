@@ -55,7 +55,8 @@ int search_disk_index(int argc, char **argv) {
   std::string dist_metric(argv[index++]);
   std::string nbr_type = argv[index++];
   int search_mode = std::atoi(argv[index++]);
-  bool use_page_search = search_mode != 0;
+  // 只有 PAGE_SEARCH (1) 需要使用 page layout，BEAM_SEARCH (0) 和 PIPE_SEARCH (2) 都不需要
+  bool use_page_search = (search_mode == PAGE_SEARCH);
   uint32_t mem_L = std::atoi(argv[index++]);
 
   pipeann::Metric m = dist_metric == "cosine" ? pipeann::Metric::COSINE : pipeann::Metric::L2;

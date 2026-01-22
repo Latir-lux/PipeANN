@@ -460,17 +460,50 @@ int main(int argc, char **argv) {
   std::cout << "Running comparison experiment for " << system_names[system_type] << std::endl;
   std::cout << "Experiment type: " << exp_type << std::endl;
   
-  if (data_type == "uint8") {
-    if (exp_type == 1) {
-      std::string output = output_dir + "/search_latency_" + system_names[system_type] + ".csv";
+  // 实验1: 搜索延迟对比
+  if (exp_type == 1) {
+    std::string output = output_dir + "/exp1_search_latency_" + 
+                        std::string(system_type == 0 ? "dc-pdi" : 
+                                   system_type == 1 ? "ip-diskann" : "fresh-diskann") + ".csv";
+    
+    if (data_type == "uint8") {
       compare_search_latency<uint8_t, uint32_t>(index_prefix, query_file, gt_file, num_threads,
                                                 (SystemType)system_type, recall_at, L_values, 4, output);
+    } else if (data_type == "int8") {
+      compare_search_latency<int8_t, uint32_t>(index_prefix, query_file, gt_file, num_threads,
+                                               (SystemType)system_type, recall_at, L_values, 4, output);
+    } else if (data_type == "float") {
+      compare_search_latency<float, uint32_t>(index_prefix, query_file, gt_file, num_threads,
+                                              (SystemType)system_type, recall_at, L_values, 4, output);
+    } else {
+      std::cerr << "Unsupported data type: " << data_type << std::endl;
+      return -1;
     }
-    // 其他实验类型类似实现...
-  } else if (data_type == "int8") {
-    // 类似实现...
-  } else if (data_type == "float") {
-    // 类似实现...
+  }
+  // 实验2和3需要DynamicSSDIndex，暂不实现
+  else if (exp_type == 2) {
+    std::cout << "Update throughput experiment not yet implemented" << std::endl;
+    std::string output = output_dir + "/exp2_update_throughput_" + 
+                        std::string(system_type == 0 ? "dc-pdi" : 
+                                   system_type == 1 ? "ip-diskann" : "fresh-diskann") + ".csv";
+    // Placeholder: create empty file
+    std::ofstream ofs(output);
+    ofs << "system,num_inserts,throughput_ops,avg_latency_us,total_time_sec\n";
+    ofs.close();
+  }
+  else if (exp_type == 3) {
+    std::cout << "Concurrent performance experiment not yet implemented" << std::endl;
+    std::string output = output_dir + "/exp3_concurrent_" + 
+                        std::string(system_type == 0 ? "dc-pdi" : 
+                                   system_type == 1 ? "ip-diskann" : "fresh-diskann") + ".csv";
+    // Placeholder: create empty file
+    std::ofstream ofs(output);
+    ofs << "system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb\n";
+    ofs.close();
+  }
+  else {
+    std::cerr << "Unknown experiment type: " << exp_type << std::endl;
+    return -1;
   }
   
   std::cout << "Experiment completed successfully!" << std::endl;

@@ -86,8 +86,7 @@ void LinuxAlignedFileReader::register_thread(int flag) {
     ioctx::ring = new io_uring();
     int ret = io_uring_queue_init(MAX_EVENTS, ioctx::ring, flag);
     if (ret < 0) {
-      LOG(ERROR) << "io_uring_queue_init failed: " << strerror(-ret)
-                 << ". This environment may not support io_uring. "
+      LOG(ERROR) << "io_uring_queue_init failed: " << strerror(-ret) << ". This environment may not support io_uring. "
                  << "Rebuild with -DUSE_AIO=ON to use libaio.";
       crash();
     }
@@ -417,7 +416,7 @@ void LinuxAlignedFileReader::send_io(std::vector<IORequest> &reqs, void *ctx, bo
     } else {
       io_prep_pread(cb.data() + j, this->file_desc, reqs[j].buf, reqs[j].len, reqs[j].offset);
     }
-    cb.data = (void *) &reqs[j];  // set user data to point to the request
+    cb[j].data = (void *) &reqs[j];  // set user data to point to the request
   }
 
   for (uint64_t i = 0; i < n_ops; i++) {

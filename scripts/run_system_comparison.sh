@@ -77,19 +77,19 @@ prepare_index() {
   local system_name=$1
   local search_mode=$2
   
-  echo "[$(date)] Preparing index for $system_name..."
+  echo "[$(date)] Preparing index for $system_name..." >&2
   
   # 如果索引不存在，先构建
   if [ ! -f "${INDEX_BASE}_disk.index" ]; then
-    echo "Building disk index..."
+    echo "Building disk index..." >&2
     ./build/tests/build_disk_index ${DATA_TYPE} ${DATA_FILE} ${INDEX_BASE} \
-      96 128 32 256 ${NUM_THREADS} l2 pq
+      96 128 32 256 ${NUM_THREADS} l2 pq >&2
   fi
   
   # 为不同系统复制索引（避免相互影响）
   local system_index="${INDEX_BASE}_${system_name}"
   if [ ! -f "${system_index}_disk.index" ]; then
-    echo "Copying index for $system_name..."
+    echo "Copying index for $system_name..." >&2
     cp ${INDEX_BASE}_disk.index ${system_index}_disk.index
     cp ${INDEX_BASE}_disk.index_pq_compressed.bin ${system_index}_disk.index_pq_compressed.bin 2>/dev/null || true
     cp ${INDEX_BASE}_disk.index_pq_pivots.bin ${system_index}_disk.index_pq_pivots.bin 2>/dev/null || true
@@ -97,7 +97,7 @@ prepare_index() {
     cp ${INDEX_BASE}_disk.index_page_layout.bin ${system_index}_disk.index_page_layout.bin 2>/dev/null || true
   fi
   
-  echo "[$(date)] Index for $system_name ready: ${system_index}"
+  echo "[$(date)] Index for $system_name ready: ${system_index}" >&2
   echo "${system_index}"
 }
 

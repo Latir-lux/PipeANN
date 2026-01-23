@@ -173,7 +173,6 @@ namespace pipeann {
     LOG(INFO) << "Setup " << kBgIOThreads << " background I/O threads for insert...";
     for (int i = 0; i < kBgIOThreads; ++i) {
       bg_io_thread_[i] = new std::thread(&SSDIndex<T, TagT>::bg_io_thread, this);
-      bg_io_thread_[i]->detach();
     }
 #endif
   }
@@ -188,6 +187,10 @@ namespace pipeann {
             .thread_data = nullptr, .writes = {}, .pages_to_unlock = {}, .pages_to_deref = {}, .terminate = true};
         bg_tasks.push(bg_task);
         bg_tasks.push_notify_all();
+        if (bg_io_thread_[i]->joinable()) {
+          bg_io_thread_[i]->join();
+        }
+        delete bg_io_thread_[i];
         bg_io_thread_[i] = nullptr;
       }
     }
@@ -206,7 +209,6 @@ namespace pipeann {
       delete buf;
     }
   }
-
 
   template<typename T, typename TagT>
   int SSDIndex<T, TagT>::load(const char *index_prefix, uint32_t num_threads, bool new_index_format,

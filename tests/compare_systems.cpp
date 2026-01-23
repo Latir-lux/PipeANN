@@ -676,6 +676,50 @@ void run_concurrent_exp(const std::string &index_prefix, const std::string &quer
   delete dist_cmp;
 }
 
+template<typename T, typename TagT = uint32_t>
+void run_update_throughput_exp(const std::string &index_prefix, const std::string &insert_file, SystemType system_type,
+                               const std::vector<uint64_t> &L_values, const std::string &output_file) {
+  if (!std::filesystem::exists(insert_file)) {
+    std::cerr << "Error: Insert file not found: " << insert_file << std::endl;
+    return;
+  }
+
+  T *insert_data = nullptr;
+  size_t insert_num = 0, insert_dim = 0;
+  pipeann::load_bin<T>(insert_file, insert_data, insert_num, insert_dim);
+  if (insert_num == 0 || insert_dim == 0) {
+    std::cerr << "Error: Insert file metadata is invalid: " << insert_file << std::endl;
+    delete[] insert_data;
+    return;
+  }
+
+  pipeann::Parameters paras;
+  uint64_t L_disk = L_values.empty() ? 100 : L_values.front();
+  paras.set(0, static_cast<uint32_t>(L_disk), 384, 1.2f, NUM_SEARCH_THREADS + NUM_INSERT_THREADS, true, 4);
+
+  pipeann::Metric metric = pipeann::Metric::L2;
+  auto *dist_cmp = pipeann::get_distance_function<T>(metric);
+  int search_mode = (system_type == DC_PDI) ? PIPE_SEARCH : BEAM_SEARCH;
+
+  pipeann::DynamicSSDIndex<T, TagT> dyn_index(paras, index_prefix, index_prefix + "_merge", dist_cmp, metric,
+                                              search_mode, false);
+
+  if (dyn_index._disk_index != nullptr && dyn_index._disk_index->data_dim != insert_dim) {
+    std::cerr << "Error: Insert dim (" << insert_dim << ") does not match index dim ("
+              << dyn_index._disk_index->data_dim << ")" << std::endl;
+    delete[] insert_data;
+    delete dist_cmp;
+    return;
+  }
+
+  bool trigger_merge = (system_type == FRESH_DISKANN);
+  compare_update_throughput<T, TagT>(dyn_index, insert_data, insert_num, insert_dim, system_type, trigger_merge,
+                                     output_file);
+
+  delete[] insert_data;
+  delete dist_cmp;
+}
+
 /**
  * 主函数
  */
@@ -764,17 +808,23 @@ int main(int argc, char **argv) {
   }
   // 实验2和3需要DynamicSSDIndex，暂不实现
   else if (exp_type == 2) {
-    std::cout << "Update throughput experiment not yet implemented" << std::endl;
     std::string output = output_dir + "/exp2_update_throughput_" +
                          std::string(system_type == 0   ? "dc-pdi"
                                      : system_type == 1 ? "ip-diskann"
                                                         : "fresh-diskann") +
                          ".csv";
-    // Placeholder: create empty file
-    std::ofstream ofs(output);
-    ofs << "system,time_sec,num_inserts,throughput_ops,memory_rss_mb,merge_triggered\n";
-    ofs << system_names[system_type] << ",0,0,0,0,0\n";
-    ofs.close();
+    if (data_type == "uint8") {
+      run_update_throughput_exp<uint8_t, uint32_t>(index_prefix, insert_file, (SystemType) system_type, L_values,
+                                                   output);
+    } else if (data_type == "int8") {
+      run_update_throughput_exp<int8_t, uint32_t>(index_prefix, insert_file, (SystemType) system_type, L_values,
+                                                  output);
+    } else if (data_type == "float") {
+      run_update_throughput_exp<float, uint32_t>(index_prefix, insert_file, (SystemType) system_type, L_values, output);
+    } else {
+      std::cerr << "Unsupported data type: " << data_type << std::endl;
+      return -1;
+    }
   } else if (exp_type == 3) {
     std::string output = output_dir + "/exp3_concurrent_" +
                          std::string(system_type == 0   ? "dc-pdi"

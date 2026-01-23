@@ -3,9 +3,10 @@
 # 运行DC-PDI、IP-DiskANN和FreshDiskANN的对比实验
 #
 # 使用方法:
-#   ./scripts/run_system_comparison.sh [dataset] [base_dir] [output_dir]
+#   ./scripts/run_system_comparison.sh [experiment] [dataset] [base_dir] [output_dir] [exp3_base_ratio] [exp3_update_ratio] [exp3_duration_sec]
 #
 # 参数:
+#   experiment: 1/2/3/all (默认: all)
 #   dataset: sift/deep/gist (默认: sift)
 #   base_dir: 数据集和索引的基础目录 (默认: /mnt/xiaoxuanx/dataset)
 #   output_dir: 输出目录 (默认: /mnt/xiaoxuanx/dataset/exp/thesis_results/system_comparison)
@@ -13,12 +14,13 @@
 set -e
 
 # ============= 配置参数 =============
-DATASET=${1:-"sift"}
-BASE_DIR=${2:-"/mnt/xiaoxuanx/dataset"}
-OUTPUT_DIR=${3:-"/mnt/xiaoxuanx/dataset/exp/thesis_results/system_comparison"}
-EXP3_BASE_RATIO=${4:-"0.5"}
-EXP3_UPDATE_RATIO=${5:-"0.5"}
-EXP3_DURATION_SEC=${6:-"120"}
+EXPERIMENT=${1:-"all"}
+DATASET=${2:-"sift"}
+BASE_DIR=${3:-"/mnt/xiaoxuanx/dataset"}
+OUTPUT_DIR=${4:-"/mnt/xiaoxuanx/dataset/exp/thesis_results/system_comparison"}
+EXP3_BASE_RATIO=${5:-"0.5"}
+EXP3_UPDATE_RATIO=${6:-"0.5"}
+EXP3_DURATION_SEC=${7:-"120"}
 NUM_THREADS=32
 RECALL_AT=10
 
@@ -68,6 +70,7 @@ echo "Query file: $QUERY_FILE"
 echo "GT file: $GT_FILE"
 echo "Index base: $INDEX_BASE"
 echo "Output directory: $OUTPUT_DIR"
+echo "Experiment: $EXPERIMENT"
 echo "============================================"
 
 # L值列表（用于搜索延迟测试）
@@ -268,6 +271,17 @@ run_concurrent_exp() {
 
 # ============= 主执行流程 =============
 
+should_run() {
+  local exp=$1
+  if [ "${EXPERIMENT}" = "all" ]; then
+    return 0
+  fi
+  if [ "${EXPERIMENT}" = "${exp}" ]; then
+    return 0
+  fi
+  return 1
+}
+
 echo ""
 echo "######################################"
 echo "#   系统对比实验开始                 #"
@@ -300,36 +314,42 @@ fi
 # ============= 运行所有系统的所有实验 =============
 
 # 实验1: 搜索延迟分布
-echo ""
-echo ">>> 开始实验1: 搜索延迟分布测试 <<<"
-run_search_latency_exp 0 "dc-pdi"
-run_search_latency_exp 1 "ip-diskann"
-run_search_latency_exp 2 "fresh-diskann"
-
-# 实验2: 更新吞吐量
-echo ""
-echo ">>> 开始实验2: 更新吞吐量测试 <<<"
-run_update_throughput_exp 0 "dc-pdi" 50000
-run_update_throughput_exp 1 "ip-diskann" 50000
-run_update_throughput_exp 2 "fresh-diskann" 50000
-
-# 实验3: 读写并发性能
-echo ""
-echo ">>> 开始实验3: 读写并发性能测试 <<<"
-prepare_exp3_data ${DATA_FILE} ${DATA_TYPE} ${EXP3_BASE_RATIO} ${EXP3_UPDATE_RATIO}
-
-EXP3_BASE_TAG=$(printf "%s" "${EXP3_BASE_RATIO}" | tr '.' 'p')
-EXP3_INDEX_BASE="${INDEX_BASE}_exp3_base${EXP3_BASE_TAG}"
-
-if [ ! -f "${EXP3_INDEX_BASE}_disk.index" ]; then
-  echo "Building exp3 base index..." >&2
-  ./build/tests/build_disk_index ${DATA_TYPE} ${EXP3_BASE_FILE} ${EXP3_INDEX_BASE} \
-    96 128 32 256 ${NUM_THREADS} l2 pq >&2
+if should_run "1"; then
+  echo ""
+  echo ">>> 开始实验1: 搜索延迟分布测试 <<<"
+  run_search_latency_exp 0 "dc-pdi"
+  run_search_latency_exp 1 "ip-diskann"
+  run_search_latency_exp 2 "fresh-diskann"
 fi
 
-run_concurrent_exp 0 "dc-pdi" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
-run_concurrent_exp 1 "ip-diskann" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
-run_concurrent_exp 2 "fresh-diskann" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
+# 实验2: 更新吞吐量
+if should_run "2"; then
+  echo ""
+  echo ">>> 开始实验2: 更新吞吐量测试 <<<"
+  run_update_throughput_exp 0 "dc-pdi" 50000
+  run_update_throughput_exp 1 "ip-diskann" 50000
+  run_update_throughput_exp 2 "fresh-diskann" 50000
+fi
+
+# 实验3: 读写并发性能
+if should_run "3"; then
+  echo ""
+  echo ">>> 开始实验3: 读写并发性能测试 <<<"
+  prepare_exp3_data ${DATA_FILE} ${DATA_TYPE} ${EXP3_BASE_RATIO} ${EXP3_UPDATE_RATIO}
+
+  EXP3_BASE_TAG=$(printf "%s" "${EXP3_BASE_RATIO}" | tr '.' 'p')
+  EXP3_INDEX_BASE="${INDEX_BASE}_exp3_base${EXP3_BASE_TAG}"
+
+  if [ ! -f "${EXP3_INDEX_BASE}_disk.index" ]; then
+    echo "Building exp3 base index..." >&2
+    ./build/tests/build_disk_index ${DATA_TYPE} ${EXP3_BASE_FILE} ${EXP3_INDEX_BASE} \
+      96 128 32 256 ${NUM_THREADS} l2 pq >&2
+  fi
+
+  run_concurrent_exp 0 "dc-pdi" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
+  run_concurrent_exp 1 "ip-diskann" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
+  run_concurrent_exp 2 "fresh-diskann" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
+fi
 
 # ============= 生成对比图表 =============
 echo ""

@@ -3,13 +3,16 @@
 # 运行DC-PDI、IP-DiskANN和FreshDiskANN的对比实验
 #
 # 使用方法:
-#   ./scripts/run_system_comparison.sh [experiment] [dataset] [base_dir] [output_dir] [exp3_base_ratio] [exp3_update_ratio] [exp3_duration_sec]
+#   ./scripts/run_system_comparison.sh [experiment] [dataset] [base_dir] [output_dir] [exp2_base_ratio] [exp2_update_rate] [exp2_duration_sec] [exp3_base_ratio] [exp3_update_ratio] [exp3_duration_sec]
 #
 # 参数:
 #   experiment: 1/2/3/all (默认: all)
 #   dataset: sift/deep/gist (默认: sift)
 #   base_dir: 数据集和索引的基础目录 (默认: /mnt/xiaoxuanx/dataset)
 #   output_dir: 输出目录 (默认: /mnt/xiaoxuanx/dataset/exp/thesis_results/system_comparison)
+#   exp2_base_ratio: 实验2基础索引占比 (默认: 0.5)
+#   exp2_update_rate: 实验2更新速率(向量/秒, 0=不限制) (默认: 0)
+#   exp2_duration_sec: 实验2持续时间(秒, 0=全量更新) (默认: 0)
 
 set -e
 
@@ -18,9 +21,12 @@ EXPERIMENT=${1:-"all"}
 DATASET=${2:-"sift"}
 BASE_DIR=${3:-"/mnt/xiaoxuanx/dataset"}
 OUTPUT_DIR=${4:-"/mnt/xiaoxuanx/dataset/exp/thesis_results/system_comparison"}
-EXP3_BASE_RATIO=${5:-"0.5"}
-EXP3_UPDATE_RATIO=${6:-"0.5"}
-EXP3_DURATION_SEC=${7:-"120"}
+EXP2_BASE_RATIO=${5:-"0.5"}
+EXP2_UPDATE_RATE=${6:-"0"}
+EXP2_DURATION_SEC=${7:-"0"}
+EXP3_BASE_RATIO=${8:-"0.5"}
+EXP3_UPDATE_RATIO=${9:-"0.5"}
+EXP3_DURATION_SEC=${10:-"120"}
 NUM_THREADS=32
 RECALL_AT=10
 
@@ -71,7 +77,18 @@ echo "GT file: $GT_FILE"
 echo "Index base: $INDEX_BASE"
 echo "Output directory: $OUTPUT_DIR"
 echo "Experiment: $EXPERIMENT"
+echo "Exp2 base ratio: $EXP2_BASE_RATIO"
+echo "Exp2 update rate: $EXP2_UPDATE_RATE"
+echo "Exp2 duration sec: $EXP2_DURATION_SEC"
+echo "Exp3 base ratio: $EXP3_BASE_RATIO"
+echo "Exp3 update ratio: $EXP3_UPDATE_RATIO"
+echo "Exp3 duration sec: $EXP3_DURATION_SEC"
 echo "============================================"
+
+if [ ! -f "${INSERT_FILE}" ]; then
+  echo "Warning: Insert file not found, fallback to data file: ${INSERT_FILE}" >&2
+  INSERT_FILE=${DATA_FILE}
+fi
 
 # L值列表（用于搜索延迟测试）
 L_VALUES="100 150 200 250 300 350 400"
@@ -137,21 +154,154 @@ run_search_latency_exp() {
 run_update_throughput_exp() {
   local system_type=$1
   local system_name=$2
-  local num_inserts=${3:-10000}
+  local insert_file=$3
+  local index_base=$4
   
   echo ""
   echo "========================================"
   echo "实验2: 更新吞吐量测试 - ${system_name}"
   echo "========================================"
   
-  local system_index=$(prepare_index ${system_name} ${system_type})
+  local system_index=$(prepare_index ${system_name} ${system_type} ${index_base})
   local output_file="${OUTPUT_DIR}/exp2_update_throughput_${system_name}.csv"
   
-  echo "[$(date)] Running update throughput test for ${system_name} (${num_inserts} inserts)..."
+  echo "[$(date)] Running update throughput test for ${system_name}..."
   ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
-    ${INSERT_FILE} ${system_type} 2 ${OUTPUT_DIR} ${NUM_THREADS} ${RECALL_AT} --exp2-num-inserts ${num_inserts}
+    ${insert_file} ${system_type} 2 ${OUTPUT_DIR} ${NUM_THREADS} ${RECALL_AT}
   
   echo "[$(date)] Update throughput test completed: ${output_file}"
+}
+
+# 准备实验2的数据分片（按比例拆分，并可限制更新量）
+prepare_exp2_data() {
+  local data_file=$1
+  local data_type=$2
+  local base_ratio=$3
+  local update_rate=$4
+  local duration_sec=$5
+
+  local data_ext="${data_file##*.}"
+  local data_prefix="${data_file%.*}"
+
+  local base_pct
+  base_pct=$(python3 - <<PY
+import math
+print(int(round(${base_ratio} * 100)))
+PY
+)
+
+  local base_file="${data_prefix}_exp2_base${base_pct}.${data_ext}"
+  local update_file="${data_prefix}_exp2_update${base_pct}.${data_ext}"
+
+  if [ -f "${base_file}" ] && [ -f "${update_file}" ]; then
+    EXP2_BASE_FILE=${base_file}
+    EXP2_UPDATE_FILE=${update_file}
+  else
+    python3 - <<PY
+import os
+import struct
+
+data_file = "${data_file}"
+base_file = "${base_file}"
+update_file = "${update_file}"
+base_ratio = float("${base_ratio}")
+update_ratio = 1.0 - base_ratio
+data_type = "${data_type}"
+
+dtype_size = {"uint8": 1, "int8": 1, "float": 4}.get(data_type)
+if dtype_size is None:
+    raise SystemExit(f"Unsupported data type: {data_type}")
+
+with open(data_file, "rb") as f:
+    header = f.read(8)
+    if len(header) != 8:
+        raise SystemExit(f"Invalid data file header: {data_file}")
+    npts, dim = struct.unpack("<ii", header)
+
+base_pts = int(npts * base_ratio)
+update_pts = int(npts * update_ratio)
+remaining = max(0, npts - base_pts)
+if update_pts > remaining:
+    update_pts = remaining
+
+if base_pts <= 0 or update_pts <= 0:
+    raise SystemExit(f"Invalid split sizes: base={base_pts}, update={update_pts}, total={npts}")
+
+def write_split(out_path, start_pt, count):
+    with open(data_file, "rb") as src, open(out_path, "wb") as dst:
+        dst.write(struct.pack("<ii", count, dim))
+        src.seek(8 + start_pt * dim * dtype_size)
+        remaining_bytes = count * dim * dtype_size
+        buf_size = 1024 * 1024
+        while remaining_bytes > 0:
+            to_read = min(buf_size, remaining_bytes)
+            chunk = src.read(to_read)
+            if not chunk:
+                raise SystemExit(f"Unexpected EOF while reading {data_file}")
+            dst.write(chunk)
+            remaining_bytes -= len(chunk)
+
+if not os.path.exists(base_file):
+    write_split(base_file, 0, base_pts)
+
+if not os.path.exists(update_file):
+    write_split(update_file, base_pts, update_pts)
+
+print(base_file)
+print(update_file)
+PY
+    EXP2_BASE_FILE=${base_file}
+    EXP2_UPDATE_FILE=${update_file}
+  fi
+
+  if [ "${update_rate}" != "0" ] && [ "${duration_sec}" != "0" ]; then
+    local target_inserts
+    target_inserts=$(python3 - <<PY
+rate=float("${update_rate}")
+duration=float("${duration_sec}")
+target=int(rate*duration)
+print(max(0, target))
+PY
+)
+    if [ "${target_inserts}" -gt 0 ]; then
+      local capped_file="${data_prefix}_exp2_update${base_pct}_cap${target_inserts}.${data_ext}"
+      if [ ! -f "${capped_file}" ]; then
+        python3 - <<PY
+import struct
+
+src_file = "${EXP2_UPDATE_FILE}"
+dst_file = "${capped_file}"
+target = int("${target_inserts}")
+data_type = "${data_type}"
+
+dtype_size = {"uint8": 1, "int8": 1, "float": 4}.get(data_type)
+if dtype_size is None:
+    raise SystemExit(f"Unsupported data type: {data_type}")
+
+with open(src_file, "rb") as src:
+    header = src.read(8)
+    if len(header) != 8:
+        raise SystemExit(f"Invalid data file header: {src_file}")
+    npts, dim = struct.unpack("<ii", header)
+    target = min(target, npts)
+    if target <= 0:
+        raise SystemExit("Target inserts must be > 0")
+    with open(dst_file, "wb") as dst:
+        dst.write(struct.pack("<ii", target, dim))
+        remaining_bytes = target * dim * dtype_size
+        buf_size = 1024 * 1024
+        while remaining_bytes > 0:
+            to_read = min(buf_size, remaining_bytes)
+            chunk = src.read(to_read)
+            if not chunk:
+                raise SystemExit(f"Unexpected EOF while reading {src_file}")
+            dst.write(chunk)
+            remaining_bytes -= len(chunk)
+PY
+      fi
+      EXP2_UPDATE_FILE=${capped_file}
+    fi
+  fi
 }
 
 # 准备实验3的数据分片（按比例拆分）
@@ -326,9 +476,20 @@ fi
 if should_run "2"; then
   echo ""
   echo ">>> 开始实验2: 更新吞吐量测试 <<<"
-  run_update_throughput_exp 0 "dc-pdi" 50000
-  run_update_throughput_exp 1 "ip-diskann" 50000
-  run_update_throughput_exp 2 "fresh-diskann" 50000
+  prepare_exp2_data ${DATA_FILE} ${DATA_TYPE} ${EXP2_BASE_RATIO} ${EXP2_UPDATE_RATE} ${EXP2_DURATION_SEC}
+
+  EXP2_BASE_TAG=$(printf "%s" "${EXP2_BASE_RATIO}" | tr '.' 'p')
+  EXP2_INDEX_BASE="${INDEX_BASE}_exp2_base${EXP2_BASE_TAG}"
+
+  if [ ! -f "${EXP2_INDEX_BASE}_disk.index" ]; then
+    echo "Building exp2 base index..." >&2
+    ./build/tests/build_disk_index ${DATA_TYPE} ${EXP2_BASE_FILE} ${EXP2_INDEX_BASE} \
+      96 128 32 256 ${NUM_THREADS} l2 pq >&2
+  fi
+
+  run_update_throughput_exp 0 "dc-pdi" ${EXP2_UPDATE_FILE} ${EXP2_INDEX_BASE}
+  run_update_throughput_exp 1 "ip-diskann" ${EXP2_UPDATE_FILE} ${EXP2_INDEX_BASE}
+  run_update_throughput_exp 2 "fresh-diskann" ${EXP2_UPDATE_FILE} ${EXP2_INDEX_BASE}
 fi
 
 # 实验3: 读写并发性能

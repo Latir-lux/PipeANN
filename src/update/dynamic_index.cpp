@@ -91,7 +91,14 @@ namespace pipeann {
 
   template<typename T, typename TagT>
   DynamicSSDIndex<T, TagT>::~DynamicSSDIndex() {
-    // put in destructor code
+    if (_disk_index != nullptr) {
+      delete _disk_index;
+      _disk_index = nullptr;
+    }
+    if (journal != nullptr) {
+      delete journal;
+      journal = nullptr;
+    }
   }
 
   template<typename T, typename TagT>

@@ -469,8 +469,8 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
 template<typename T, typename TagT = uint32_t>
 void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T *query_data, T *insert_data,
                                     size_t query_num, size_t insert_num, size_t data_dim, uint64_t recall_at,
-                                    uint64_t L, uint32_t beam_width, SystemType system_type,
-                                    const std::string &output_file) {
+                                    uint64_t L, uint32_t beam_width, double duration_sec, double insert_rate,
+                                    SystemType system_type, const std::string &output_file) {
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
     ofs << "system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb\n";
@@ -514,8 +514,16 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
   };
 
   // 插入线程
+  auto start_time = std::chrono::steady_clock::now();
   auto insert_func = [&]() {
     while (!stop_test.load()) {
+      if (duration_sec > 0) {
+        double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+        if (elapsed >= duration_sec) {
+          stop_test.store(true);
+          break;
+        }
+      }
       uint64_t idx = insert_count.fetch_add(1);
       if (idx >= insert_num)
         break;
@@ -526,6 +534,21 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
       // FreshDiskANN模式: 周期性合并
       if (system_type == FRESH_DISKANN && idx % MERGE_INTERVAL == MERGE_INTERVAL - 1) {
         index.final_merge(NUM_SEARCH_THREADS / 2);
+      }
+
+      if (duration_sec > 0 && insert_rate > 0) {
+        while (!stop_test.load()) {
+          double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+          if (elapsed >= duration_sec) {
+            stop_test.store(true);
+            break;
+          }
+          double expected = insert_rate * elapsed;
+          if (static_cast<double>(insert_count.load()) <= expected) {
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
       }
     }
   };
@@ -571,7 +594,7 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
           << "," << insert_tput << "," << (rss_kb / 1024.0) << "\n";
       ofs.flush();
 
-      if (inserts >= insert_num) {
+      if ((duration_sec > 0 && elapsed_sec >= duration_sec) || inserts >= insert_num) {
         stop_test.store(true);
         break;
       }
@@ -594,6 +617,65 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
   std::cout << "[" << system_names[system_type] << "] Concurrent test completed" << std::endl;
 }
 
+template<typename T, typename TagT = uint32_t>
+void run_concurrent_exp(const std::string &index_prefix, const std::string &query_file, const std::string &insert_file,
+                        SystemType system_type, uint64_t recall_at, const std::vector<uint64_t> &L_values,
+                        uint32_t beam_width, double update_ratio, double duration_sec, const std::string &output_file) {
+  T *query = nullptr;
+  size_t query_num = 0, query_dim = 0;
+  pipeann::load_bin<T>(query_file, query, query_num, query_dim);
+  if (query_num == 0 || query_dim == 0) {
+    std::cerr << "Error: Query file metadata is invalid: " << query_file << std::endl;
+    delete[] query;
+    return;
+  }
+
+  T *insert_data = nullptr;
+  size_t insert_num = 0, insert_dim = 0;
+  pipeann::load_bin<T>(insert_file, insert_data, insert_num, insert_dim);
+  if (insert_num == 0 || insert_dim == 0) {
+    std::cerr << "Error: Insert file metadata is invalid: " << insert_file << std::endl;
+    delete[] query;
+    delete[] insert_data;
+    return;
+  }
+  if (insert_dim != query_dim) {
+    std::cerr << "Error: Insert dim (" << insert_dim << ") does not match query dim (" << query_dim << ")" << std::endl;
+    delete[] query;
+    delete[] insert_data;
+    return;
+  }
+
+  if (update_ratio > 0.0 && update_ratio < 1.0) {
+    insert_num = static_cast<size_t>(insert_num * update_ratio);
+    if (insert_num == 0) {
+      std::cerr << "Error: update_ratio too small, no insertions to run." << std::endl;
+      delete[] query;
+      delete[] insert_data;
+      return;
+    }
+  }
+
+  pipeann::Parameters paras;
+  uint64_t L_disk = L_values.empty() ? 100 : L_values.front();
+  paras.set(0, static_cast<uint32_t>(L_disk), 384, 1.2f, NUM_SEARCH_THREADS + NUM_INSERT_THREADS, true, beam_width);
+
+  pipeann::Metric metric = pipeann::Metric::L2;
+  auto *dist_cmp = pipeann::get_distance_function<T>(metric);
+  int search_mode = (system_type == DC_PDI) ? PIPE_SEARCH : BEAM_SEARCH;
+
+  pipeann::DynamicSSDIndex<T, TagT> dyn_index(paras, index_prefix, index_prefix + "_merge", dist_cmp, metric,
+                                              search_mode, false);
+
+  double insert_rate = (duration_sec > 0) ? (static_cast<double>(insert_num) / duration_sec) : 0.0;
+  compare_concurrent_performance<T, TagT>(dyn_index, query, insert_data, query_num, insert_num, query_dim, recall_at,
+                                          L_disk, beam_width, duration_sec, insert_rate, system_type, output_file);
+
+  delete[] query;
+  delete[] insert_data;
+  delete dist_cmp;
+}
+
 /**
  * 主函数
  */
@@ -601,11 +683,14 @@ int main(int argc, char **argv) {
   if (argc < 10) {
     std::cout << "Usage: " << argv[0] << " <data_type> <index_prefix> <query_file> <gt_file>"
               << " <insert_data_file> <system_type> <experiment_type>"
-              << " <output_dir> <num_threads> [recall_at] [L_values...]\n";
+              << " <output_dir> <num_threads> [recall_at] [L_values...]"
+              << " [--exp3-duration-sec <sec>] [--exp3-update-ratio <ratio>]\n";
     std::cout << "\nParameters:\n";
     std::cout << "  data_type: uint8/int8/float\n";
     std::cout << "  system_type: 0=DC-PDI, 1=IP-DiskANN, 2=FreshDiskANN\n";
     std::cout << "  experiment_type: 1=search_latency, 2=update_throughput, 3=concurrent\n";
+    std::cout << "  --exp3-duration-sec: fixed duration for experiment 3 (seconds)\n";
+    std::cout << "  --exp3-update-ratio: fraction of insert dataset to use in experiment 3\n";
     return -1;
   }
 
@@ -622,12 +707,33 @@ int main(int argc, char **argv) {
 
   uint64_t recall_at = (argc > arg_no) ? atoi(argv[arg_no++]) : 10;
 
+  double exp3_duration_sec = 120.0;
+  double exp3_update_ratio = 1.0;
+
   std::vector<uint64_t> L_values;
   if (argc > arg_no) {
     for (int i = arg_no; i < argc; i++) {
+      std::string arg(argv[i]);
+      if (arg.rfind("--exp3-duration-sec=", 0) == 0) {
+        exp3_duration_sec = std::stod(arg.substr(strlen("--exp3-duration-sec=")));
+        continue;
+      }
+      if (arg == "--exp3-duration-sec" && i + 1 < argc) {
+        exp3_duration_sec = std::stod(argv[++i]);
+        continue;
+      }
+      if (arg.rfind("--exp3-update-ratio=", 0) == 0) {
+        exp3_update_ratio = std::stod(arg.substr(strlen("--exp3-update-ratio=")));
+        continue;
+      }
+      if (arg == "--exp3-update-ratio" && i + 1 < argc) {
+        exp3_update_ratio = std::stod(argv[++i]);
+        continue;
+      }
       L_values.push_back(atoi(argv[i]));
     }
-  } else {
+  }
+  if (L_values.empty()) {
     L_values = {100, 200, 300, 400, 500};
   }
 
@@ -670,17 +776,24 @@ int main(int argc, char **argv) {
     ofs << system_names[system_type] << ",0,0,0,0,0\n";
     ofs.close();
   } else if (exp_type == 3) {
-    std::cout << "Concurrent performance experiment not yet implemented" << std::endl;
     std::string output = output_dir + "/exp3_concurrent_" +
                          std::string(system_type == 0   ? "dc-pdi"
                                      : system_type == 1 ? "ip-diskann"
                                                         : "fresh-diskann") +
                          ".csv";
-    // Placeholder: create empty file
-    std::ofstream ofs(output);
-    ofs << "system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb\n";
-    ofs << system_names[system_type] << ",0,0,0,0,0,0\n";
-    ofs.close();
+    if (data_type == "uint8") {
+      run_concurrent_exp<uint8_t, uint32_t>(index_prefix, query_file, insert_file, (SystemType) system_type, recall_at,
+                                            L_values, 4, exp3_update_ratio, exp3_duration_sec, output);
+    } else if (data_type == "int8") {
+      run_concurrent_exp<int8_t, uint32_t>(index_prefix, query_file, insert_file, (SystemType) system_type, recall_at,
+                                           L_values, 4, exp3_update_ratio, exp3_duration_sec, output);
+    } else if (data_type == "float") {
+      run_concurrent_exp<float, uint32_t>(index_prefix, query_file, insert_file, (SystemType) system_type, recall_at,
+                                          L_values, 4, exp3_update_ratio, exp3_duration_sec, output);
+    } else {
+      std::cerr << "Unsupported data type: " << data_type << std::endl;
+      return -1;
+    }
   } else {
     std::cerr << "Unknown experiment type: " << exp_type << std::endl;
     return -1;

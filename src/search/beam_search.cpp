@@ -220,7 +220,7 @@ namespace pipeann {
           }
         }
 
-        if (dyn_search_l) {
+        if (dyn_search_l && exclude_nodes != nullptr) {
           // TODO(gh): contention still exists in id2tag(x)
           // O(n), but it is not slow as L is typically smaller than 300.
           // l_search monotonically increases to handle deleted nodes.
@@ -283,8 +283,9 @@ namespace pipeann {
     // iterate to fixed point
     std::shared_lock lk(merge_lock);
     std::vector<Neighbor> expanded_nodes_info;
+    bool use_dyn_search_l = dyn_search_l && deleted_nodes != nullptr;
     this->do_beam_search(query, mem_L, (uint32_t) l_search, (uint32_t) beam_width, expanded_nodes_info, nullptr,
-                         nullptr, stats, deleted_nodes, dyn_search_l);
+                         nullptr, stats, deleted_nodes, use_dyn_search_l);
     uint64_t res_count = 0;
     for (uint32_t i = 0; i < l_search && res_count < k_search && i < expanded_nodes_info.size(); i++) {
       res_tags[res_count] = id2tag(expanded_nodes_info[i].id);

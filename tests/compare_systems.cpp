@@ -48,6 +48,43 @@ enum SystemType {
 const char *system_names[] = {"DC-PDI", "IP-DiskANN", "FreshDiskANN"};
 
 namespace {
+  template<typename T>
+  bool load_bin_subset(const std::string &bin_file, T *&data, size_t &npts, size_t &dim, size_t max_pts) {
+    std::ifstream reader(bin_file, std::ios::binary);
+    if (!reader.is_open()) {
+      std::cerr << "Error: Unable to open bin file: " << bin_file << std::endl;
+      return false;
+    }
+
+    int32_t npts_i32 = 0;
+    int32_t dim_i32 = 0;
+    reader.read(reinterpret_cast<char *>(&npts_i32), sizeof(int32_t));
+    reader.read(reinterpret_cast<char *>(&dim_i32), sizeof(int32_t));
+    if (!reader || npts_i32 <= 0 || dim_i32 <= 0) {
+      std::cerr << "Error: Invalid bin header in " << bin_file << std::endl;
+      return false;
+    }
+
+    size_t total_npts = static_cast<size_t>(static_cast<unsigned>(npts_i32));
+    dim = static_cast<size_t>(static_cast<unsigned>(dim_i32));
+    npts = total_npts;
+    if (max_pts > 0 && max_pts < npts) {
+      npts = max_pts;
+    }
+
+    size_t total_count = npts * dim;
+    data = new T[total_count];
+    reader.read(reinterpret_cast<char *>(data), total_count * sizeof(T));
+    if (!reader) {
+      std::cerr << "Error: Failed to read bin data from " << bin_file << std::endl;
+      delete[] data;
+      data = nullptr;
+      return false;
+    }
+
+    return true;
+  }
+
   bool load_truthset_ivecs(const std::string &gt_file, size_t expected_queries, uint32_t *&ids, float *&dists,
                            size_t &npts, size_t &dim) {
     std::ifstream reader(gt_file, std::ios::binary | std::ios::ate);
@@ -678,7 +715,8 @@ void run_concurrent_exp(const std::string &index_prefix, const std::string &quer
 
 template<typename T, typename TagT = uint32_t>
 void run_update_throughput_exp(const std::string &index_prefix, const std::string &insert_file, SystemType system_type,
-                               const std::vector<uint64_t> &L_values, const std::string &output_file) {
+                               const std::vector<uint64_t> &L_values, size_t max_inserts,
+                               const std::string &output_file) {
   if (!std::filesystem::exists(insert_file)) {
     std::cerr << "Error: Insert file not found: " << insert_file << std::endl;
     return;
@@ -686,7 +724,9 @@ void run_update_throughput_exp(const std::string &index_prefix, const std::strin
 
   T *insert_data = nullptr;
   size_t insert_num = 0, insert_dim = 0;
-  pipeann::load_bin<T>(insert_file, insert_data, insert_num, insert_dim);
+  if (!load_bin_subset<T>(insert_file, insert_data, insert_num, insert_dim, max_inserts)) {
+    return;
+  }
   if (insert_num == 0 || insert_dim == 0) {
     std::cerr << "Error: Insert file metadata is invalid: " << insert_file << std::endl;
     delete[] insert_data;
@@ -728,11 +768,12 @@ int main(int argc, char **argv) {
     std::cout << "Usage: " << argv[0] << " <data_type> <index_prefix> <query_file> <gt_file>"
               << " <insert_data_file> <system_type> <experiment_type>"
               << " <output_dir> <num_threads> [recall_at] [L_values...]"
-              << " [--exp3-duration-sec <sec>] [--exp3-update-ratio <ratio>]\n";
+              << " [--exp2-num-inserts <count>] [--exp3-duration-sec <sec>] [--exp3-update-ratio <ratio>]\n";
     std::cout << "\nParameters:\n";
     std::cout << "  data_type: uint8/int8/float\n";
     std::cout << "  system_type: 0=DC-PDI, 1=IP-DiskANN, 2=FreshDiskANN\n";
     std::cout << "  experiment_type: 1=search_latency, 2=update_throughput, 3=concurrent\n";
+    std::cout << "  --exp2-num-inserts: cap insert count for experiment 2\n";
     std::cout << "  --exp3-duration-sec: fixed duration for experiment 3 (seconds)\n";
     std::cout << "  --exp3-update-ratio: fraction of insert dataset to use in experiment 3\n";
     return -1;
@@ -753,6 +794,7 @@ int main(int argc, char **argv) {
 
   double exp3_duration_sec = 120.0;
   double exp3_update_ratio = 1.0;
+  size_t exp2_num_inserts = 0;
 
   std::vector<uint64_t> L_values;
   if (argc > arg_no) {
@@ -772,6 +814,14 @@ int main(int argc, char **argv) {
       }
       if (arg == "--exp3-update-ratio" && i + 1 < argc) {
         exp3_update_ratio = std::stod(argv[++i]);
+        continue;
+      }
+      if (arg.rfind("--exp2-num-inserts=", 0) == 0) {
+        exp2_num_inserts = static_cast<size_t>(std::stoull(arg.substr(strlen("--exp2-num-inserts="))));
+        continue;
+      }
+      if (arg == "--exp2-num-inserts" && i + 1 < argc) {
+        exp2_num_inserts = static_cast<size_t>(std::stoull(argv[++i]));
         continue;
       }
       L_values.push_back(atoi(argv[i]));
@@ -815,12 +865,13 @@ int main(int argc, char **argv) {
                          ".csv";
     if (data_type == "uint8") {
       run_update_throughput_exp<uint8_t, uint32_t>(index_prefix, insert_file, (SystemType) system_type, L_values,
-                                                   output);
+                                                   exp2_num_inserts, output);
     } else if (data_type == "int8") {
       run_update_throughput_exp<int8_t, uint32_t>(index_prefix, insert_file, (SystemType) system_type, L_values,
-                                                  output);
+                                                  exp2_num_inserts, output);
     } else if (data_type == "float") {
-      run_update_throughput_exp<float, uint32_t>(index_prefix, insert_file, (SystemType) system_type, L_values, output);
+      run_update_throughput_exp<float, uint32_t>(index_prefix, insert_file, (SystemType) system_type, L_values,
+                                                 exp2_num_inserts, output);
     } else {
       std::cerr << "Unsupported data type: " << data_type << std::endl;
       return -1;

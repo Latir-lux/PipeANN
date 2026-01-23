@@ -149,7 +149,7 @@ run_update_throughput_exp() {
   
   echo "[$(date)] Running update throughput test for ${system_name} (${num_inserts} inserts)..."
   ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
-    ${INSERT_FILE} ${system_type} 2 ${OUTPUT_DIR} ${NUM_THREADS} ${RECALL_AT}
+    ${INSERT_FILE} ${system_type} 2 ${OUTPUT_DIR} ${NUM_THREADS} ${RECALL_AT} --exp2-num-inserts ${num_inserts}
   
   echo "[$(date)] Update throughput test completed: ${output_file}"
 }

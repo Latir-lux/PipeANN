@@ -28,6 +28,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <limits>
 
 #include "aux_utils.h"
 #include "index.h"
@@ -45,6 +46,139 @@ enum SystemType {
 };
 
 const char *system_names[] = {"DC-PDI", "IP-DiskANN", "FreshDiskANN"};
+
+namespace {
+  bool load_truthset_ivecs(const std::string &gt_file, size_t expected_queries, uint32_t *&ids, float *&dists,
+                           size_t &npts, size_t &dim) {
+    std::ifstream reader(gt_file, std::ios::binary | std::ios::ate);
+    if (!reader.is_open()) {
+      std::cerr << "Error: Unable to open ground truth file: " << gt_file << std::endl;
+      return false;
+    }
+
+    const size_t file_size = static_cast<size_t>(reader.tellg());
+    reader.seekg(0);
+
+    int32_t k = 0;
+    reader.read(reinterpret_cast<char *>(&k), sizeof(int32_t));
+    if (!reader || k <= 0) {
+      std::cerr << "Error: Invalid ivecs ground truth header in " << gt_file << std::endl;
+      return false;
+    }
+
+    const size_t record_size = (static_cast<size_t>(k) + 1) * sizeof(int32_t);
+    if (file_size % record_size != 0) {
+      std::cerr << "Error: ivecs ground truth file size mismatch for " << gt_file << std::endl;
+      return false;
+    }
+
+    npts = file_size / record_size;
+    dim = static_cast<size_t>(k);
+
+    if (expected_queries > 0 && npts != expected_queries) {
+      std::cerr << "Error: Ground truth query count (" << npts << ") does not match expected queries ("
+                << expected_queries << ") in " << gt_file << std::endl;
+      return false;
+    }
+
+    ids = new uint32_t[npts * dim];
+    dists = nullptr;
+
+    reader.seekg(0);
+    for (size_t i = 0; i < npts; i++) {
+      int32_t row_dim = 0;
+      reader.read(reinterpret_cast<char *>(&row_dim), sizeof(int32_t));
+      if (!reader || row_dim != k) {
+        std::cerr << "Error: ivecs row dimension mismatch at row " << i << " in " << gt_file << std::endl;
+        delete[] ids;
+        ids = nullptr;
+        return false;
+      }
+      reader.read(reinterpret_cast<char *>(ids + i * dim), dim * sizeof(uint32_t));
+      if (!reader) {
+        std::cerr << "Error: Failed reading ivecs data at row " << i << " in " << gt_file << std::endl;
+        delete[] ids;
+        ids = nullptr;
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  bool load_truthset_auto(const std::string &gt_file, size_t expected_queries, uint32_t *&ids, float *&dists,
+                          size_t &npts, size_t &dim) {
+    const size_t actual_file_size = get_file_size(gt_file);
+
+    auto safe_mul = [](size_t a, size_t b, size_t &out) -> bool {
+      if (a == 0 || b == 0) {
+        out = 0;
+        return true;
+      }
+      if (a > std::numeric_limits<size_t>::max() / b) {
+        return false;
+      }
+      out = a * b;
+      return true;
+    };
+
+    std::ifstream reader(gt_file, std::ios::binary);
+    if (!reader.is_open()) {
+      std::cerr << "Error: Unable to open ground truth file: " << gt_file << std::endl;
+      return false;
+    }
+
+    int npts_i32 = 0;
+    int dim_i32 = 0;
+    reader.read(reinterpret_cast<char *>(&npts_i32), sizeof(int));
+    reader.read(reinterpret_cast<char *>(&dim_i32), sizeof(int));
+    if (!reader) {
+      std::cerr << "Error: Failed reading ground truth header from " << gt_file << std::endl;
+      return false;
+    }
+
+    if (npts_i32 <= 0 || dim_i32 <= 0) {
+      return load_truthset_ivecs(gt_file, expected_queries, ids, dists, npts, dim);
+    }
+
+    const size_t npts_candidate = static_cast<size_t>(static_cast<unsigned>(npts_i32));
+    const size_t dim_candidate = static_cast<size_t>(static_cast<unsigned>(dim_i32));
+    size_t npts_dim = 0;
+    if (!safe_mul(npts_candidate, dim_candidate, npts_dim)) {
+      return load_truthset_ivecs(gt_file, expected_queries, ids, dists, npts, dim);
+    }
+
+    size_t expected_ids_only = 0;
+    size_t expected_with_dists = 0;
+    size_t expected_with_tags = 0;
+    if (!safe_mul(npts_dim, sizeof(uint32_t), expected_ids_only)) {
+      return load_truthset_ivecs(gt_file, expected_queries, ids, dists, npts, dim);
+    }
+    if (!safe_mul(npts_dim, sizeof(uint32_t) * 2, expected_with_dists)) {
+      return load_truthset_ivecs(gt_file, expected_queries, ids, dists, npts, dim);
+    }
+    expected_ids_only += 2 * sizeof(uint32_t);
+    expected_with_dists += 2 * sizeof(uint32_t);
+
+    size_t npts_dim_times_three = 0;
+    if (safe_mul(npts_dim, 3, npts_dim_times_three) &&
+        safe_mul(npts_dim_times_three, sizeof(uint32_t), expected_with_tags)) {
+      expected_with_tags += 2 * sizeof(uint32_t);
+      if (actual_file_size == expected_with_tags) {
+        std::cerr << "Error: Ground truth file includes tags, which is not supported in compare_systems: " << gt_file
+                  << std::endl;
+        return false;
+      }
+    }
+
+    if (actual_file_size == expected_with_dists || actual_file_size == expected_ids_only) {
+      pipeann::load_truthset(gt_file, ids, dists, npts, dim);
+      return true;
+    }
+
+    return load_truthset_ivecs(gt_file, expected_queries, ids, dists, npts, dim);
+  }
+}  // namespace
 
 // 全局配置
 const int NUM_SEARCH_THREADS = 32;
@@ -110,7 +244,11 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
   unsigned *gt_ids = nullptr;
   float *gt_dists = nullptr;
   size_t gt_num, gt_dim;
-  pipeann::load_truthset(gt_file, gt_ids, gt_dists, gt_num, gt_dim);
+  if (!load_truthset_auto(gt_file, query_num, gt_ids, gt_dists, gt_num, gt_dim)) {
+    std::cerr << "Error: Failed to load ground truth file: " << gt_file << std::endl;
+    delete[] query;
+    return;
+  }
   std::cout << "Loaded groundtruth: " << gt_num << " queries, k=" << gt_dim << std::endl;
   if (query_num == 0 || query_dim == 0 || gt_num == 0 || gt_dim == 0) {
     std::cerr << "Error: Query or groundtruth metadata is invalid." << std::endl;

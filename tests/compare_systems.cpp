@@ -164,15 +164,13 @@ namespace {
     if (safe_mul(npts_dim, 3, npts_dim_times_three) &&
         safe_mul(npts_dim_times_three, sizeof(uint32_t), expected_with_tags)) {
       expected_with_tags += 2 * sizeof(uint32_t);
-      if (actual_file_size == expected_with_tags) {
-        std::cerr << "Error: Ground truth file includes tags, which is not supported in compare_systems: " << gt_file
-                  << std::endl;
-        return false;
-      }
     }
 
-    if (actual_file_size == expected_with_dists || actual_file_size == expected_ids_only) {
-      pipeann::load_truthset(gt_file, ids, dists, npts, dim);
+    if (actual_file_size == expected_with_dists || actual_file_size == expected_ids_only ||
+        actual_file_size == expected_with_tags) {
+      uint32_t *tags = nullptr;
+      pipeann::load_truthset(gt_file, ids, dists, npts, dim, actual_file_size == expected_with_tags ? &tags : nullptr);
+      delete[] tags;
       return true;
     }
 
@@ -668,7 +666,8 @@ int main(int argc, char **argv) {
                          ".csv";
     // Placeholder: create empty file
     std::ofstream ofs(output);
-    ofs << "system,num_inserts,throughput_ops,avg_latency_us,total_time_sec\n";
+    ofs << "system,time_sec,num_inserts,throughput_ops,memory_rss_mb,merge_triggered\n";
+    ofs << system_names[system_type] << ",0,0,0,0,0\n";
     ofs.close();
   } else if (exp_type == 3) {
     std::cout << "Concurrent performance experiment not yet implemented" << std::endl;
@@ -680,6 +679,7 @@ int main(int argc, char **argv) {
     // Placeholder: create empty file
     std::ofstream ofs(output);
     ofs << "system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb\n";
+    ofs << system_names[system_type] << ",0,0,0,0,0,0\n";
     ofs.close();
   } else {
     std::cerr << "Unknown experiment type: " << exp_type << std::endl;

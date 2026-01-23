@@ -53,9 +53,7 @@ namespace v2 {
     bool deref(uint64_t block_no) {
       bool ret = cache.uprase_fn(block_no, [&](PageCacheItem &v, libcuckoo::UpsertContext ctx) {
         if (ctx == libcuckoo::UpsertContext::NEWLY_INSERTED) {
-          LOG(ERROR) << "PageCache: deref a non-exist block_no: " << block_no;
           return true;
-          __builtin_trap();
         }
         uint64_t refs = v.deref();
         if (refs == 0) {

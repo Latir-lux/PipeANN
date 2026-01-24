@@ -30,28 +30,29 @@ EXP3_DURATION_SEC=${10:-"120"}
 NUM_THREADS=32
 RECALL_AT=10
 
-# 创建输出目录
-mkdir -p ${OUTPUT_DIR}
+# 为不同数据集隔离输出目录，避免覆盖
+RESULTS_DIR="${OUTPUT_DIR}/${DATASET}"
+mkdir -p ${RESULTS_DIR}
 
 # ============= 数据集配置 =============
 case $DATASET in
   sift)
     DATA_TYPE="uint8"
     DATA_DIM=128
-    DATA_FILE="${BASE_DIR}/bigann/100M.bbin"
-    QUERY_FILE="${BASE_DIR}/bigann/bigann_query.bbin"
+    DATA_FILE="${BASE_DIR}/bigann/bigann.bin"
+    QUERY_FILE="${BASE_DIR}/bigann/bigann_query.bin"
     GT_FILE="${BASE_DIR}/bigann/100M_gt.bin"
-    INSERT_FILE="${BASE_DIR}/bigann/bigann_learn.bbin"  # 用于插入测试
-    INDEX_BASE="${BASE_DIR}/indices/bigann/100m"
+    INSERT_FILE="${BASE_DIR}/bigann/bigann_learn.bin"  # 用于插入测试
+    INDEX_BASE="${BASE_DIR}/bigann/indices/sift-100m"
     ;;
   deep)
     DATA_TYPE="float"
     DATA_DIM=96
-    DATA_FILE="${BASE_DIR}/deep1b/100M.fbin"
-    QUERY_FILE="${BASE_DIR}/deep1b/deep_query.fbin"
-    GT_FILE="${BASE_DIR}/deep1b/100M_gt.bin"
-    INSERT_FILE="${BASE_DIR}/deep1b/deep_learn.fbin"
-    INDEX_BASE="${BASE_DIR}/indices/deep/100m"
+    DATA_FILE="${BASE_DIR}/deep/deep1M_base.bin"
+    QUERY_FILE="${BASE_DIR}/deep/deep1M_query.bin"
+    GT_FILE="${BASE_DIR}/deep/gt_10.bin"
+    INSERT_FILE="${BASE_DIR}/deep/deep_learn.bin"
+    INDEX_BASE="${BASE_DIR}/deep/indices/deep-100m"
     ;;
   gist)
     DATA_TYPE="uint8"
@@ -75,7 +76,7 @@ echo "Data file: $DATA_FILE"
 echo "Query file: $QUERY_FILE"
 echo "GT file: $GT_FILE"
 echo "Index base: $INDEX_BASE"
-echo "Output directory: $OUTPUT_DIR"
+echo "Output directory: $RESULTS_DIR"
 echo "Experiment: $EXPERIMENT"
 echo "Exp2 base ratio: $EXP2_BASE_RATIO"
 echo "Exp2 update rate: $EXP2_UPDATE_RATE"
@@ -91,15 +92,37 @@ if [ ! -f "${INSERT_FILE}" ]; then
 fi
 
 # L值列表（用于搜索延迟测试）
-L_VALUES="100 150 200 250 300 350 400"
+L_VALUES="50 55 60 65 70 75 80 85 90 95 100 105 110 115 120 125 130 135 140 145 150 155 160 165 170 175 180 185 190 195 200 205 210 215 220 225 230 235 240 245 250 255 260 265 270 275 280 285 290 295 300 305 310 315 320 325 330 335 340 345 350 355 360 365 370 375 380 385 390 395 400 405 410 415 420 425 430 435 440 445 450 455 460 465 470 475 480 485 490 495 500"
 
 # ============= 函数定义 =============
+
+# 软链接/复制辅助函数（优先硬链接，失败则复制）
+link_or_copy() {
+  local src=$1
+  local dst=$2
+
+  if [ -f "${src}" ] && [ ! -f "${dst}" ]; then
+    ln "${src}" "${dst}" 2>/dev/null || cp "${src}" "${dst}"
+  fi
+}
+
+# 清理系统专用索引文件
+cleanup_system_index() {
+  local system_index=$1
+
+  rm -f "${system_index}_disk.index" "${system_index}_disk.index.tags"
+  rm -f "${system_index}_pq_compressed.bin" "${system_index}_pq_pivots.bin"
+  rm -f "${system_index}_sample_data.bin" "${system_index}_partition.bin.aligned"
+  rm -f "${system_index}_mem.index" "${system_index}_mem.index.data" "${system_index}_mem.index.tags"
+  rm -rf "${system_index}_merge" "${system_index}_merge"*
+}
 
 # 准备索引的函数
 prepare_index() {
   local system_name=$1
   local search_mode=$2
   local index_base=${3:-"${INDEX_BASE}"}
+  local read_only=${4:-"false"}
   
   echo "[$(date)] Preparing index for $system_name..." >&2
   
@@ -110,20 +133,25 @@ prepare_index() {
       96 128 32 256 ${NUM_THREADS} l2 pq >&2
   fi
   
-  # 为不同系统复制索引（避免相互影响）
+  if [ "${read_only}" = "true" ]; then
+    echo "[$(date)] Reusing shared index for ${system_name}: ${index_base}" >&2
+    echo "${index_base}"
+    return
+  fi
+
+  # 为不同系统准备专用索引（仅复制会被修改的文件）
   local system_index="${index_base}_${system_name}"
   if [ ! -f "${system_index}_disk.index" ]; then
-    echo "Copying index for $system_name..." >&2
-    # 主索引文件
+    echo "Preparing writable index for $system_name..." >&2
+    # 主索引文件需要独立副本
     cp ${index_base}_disk.index ${system_index}_disk.index
-    # PQ量化文件（注意：文件名格式是 {prefix}_pq_*.bin，不是 {prefix}_disk.index_pq_*.bin）
-    cp ${index_base}_pq_compressed.bin ${system_index}_pq_compressed.bin 2>/dev/null || true
-    cp ${index_base}_pq_pivots.bin ${system_index}_pq_pivots.bin 2>/dev/null || true
-    # 其他辅助文件
-    cp ${index_base}_sample_data.bin ${system_index}_sample_data.bin 2>/dev/null || true
-    cp ${index_base}_partition.bin.aligned ${system_index}_partition.bin.aligned 2>/dev/null || true
-    # 标签文件（如果存在）
+    # 标签文件可能被更新，保持独立副本
     cp ${index_base}_disk.index.tags ${system_index}_disk.index.tags 2>/dev/null || true
+    # 共享只读文件（优先硬链接，失败则复制）
+    link_or_copy ${index_base}_pq_compressed.bin ${system_index}_pq_compressed.bin
+    link_or_copy ${index_base}_pq_pivots.bin ${system_index}_pq_pivots.bin
+    link_or_copy ${index_base}_sample_data.bin ${system_index}_sample_data.bin
+    link_or_copy ${index_base}_partition.bin.aligned ${system_index}_partition.bin.aligned
   fi
   
   echo "[$(date)] Index for $system_name ready: ${system_index}" >&2
@@ -140,12 +168,12 @@ run_search_latency_exp() {
   echo "实验1: 搜索延迟分布测试 - ${system_name}"
   echo "========================================"
   
-  local system_index=$(prepare_index ${system_name} ${system_type})
-  local output_file="${OUTPUT_DIR}/exp1_search_latency_${system_name}.csv"
+  local system_index=$(prepare_index ${system_name} ${system_type} "${INDEX_BASE}" true)
+  local output_file="${RESULTS_DIR}/exp1_search_latency_${system_name}.csv"
   
   echo "[$(date)] Running search latency test for ${system_name}..."
   ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
-    ${INSERT_FILE} ${system_type} 1 ${OUTPUT_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES}
+    ${INSERT_FILE} ${system_type} 1 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES}
   
   echo "[$(date)] Search latency test completed: ${output_file}"
 }
@@ -162,14 +190,15 @@ run_update_throughput_exp() {
   echo "实验2: 更新吞吐量测试 - ${system_name}"
   echo "========================================"
   
-  local system_index=$(prepare_index ${system_name} ${system_type} ${index_base})
-  local output_file="${OUTPUT_DIR}/exp2_update_throughput_${system_name}.csv"
+  local system_index=$(prepare_index ${system_name} ${system_type} ${index_base} false)
+  local output_file="${RESULTS_DIR}/exp2_update_throughput_${system_name}.csv"
   
   echo "[$(date)] Running update throughput test for ${system_name}..."
   ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
-    ${insert_file} ${system_type} 2 ${OUTPUT_DIR} ${NUM_THREADS} ${RECALL_AT}
+    ${insert_file} ${system_type} 2 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT}
   
   echo "[$(date)] Update throughput test completed: ${output_file}"
+  cleanup_system_index ${system_index}
 }
 
 # 准备实验2的数据分片（按比例拆分，并可限制更新量）
@@ -408,15 +437,16 @@ run_concurrent_exp() {
   echo "实验3: 读写并发性能测试 - ${system_name}"
   echo "========================================"
   
-  local system_index=$(prepare_index ${system_name} ${system_type} ${index_base})
-  local output_file="${OUTPUT_DIR}/exp3_concurrent_${system_name}.csv"
+  local system_index=$(prepare_index ${system_name} ${system_type} ${index_base} false)
+  local output_file="${RESULTS_DIR}/exp3_concurrent_${system_name}.csv"
   
   echo "[$(date)] Running concurrent test for ${system_name} (${duration_sec}s)..."
   ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
-    ${insert_file} ${system_type} 3 ${OUTPUT_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES} \
+    ${insert_file} ${system_type} 3 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES} \
     --exp3-duration-sec ${duration_sec} --exp3-update-ratio ${EXP3_UPDATE_RATIO}
   
   echo "[$(date)] Concurrent test completed: ${output_file}"
+  cleanup_system_index ${system_index}
 }
 
 # ============= 主执行流程 =============
@@ -516,8 +546,8 @@ fi
 echo ""
 echo ">>> 生成对比图表 <<<"
 if [ -f "./draw/plot_system_comparison.py" ]; then
-  python3 ./draw/plot_system_comparison.py ${OUTPUT_DIR}
-  echo "[$(date)] Plots generated in: ${OUTPUT_DIR}/figures/"
+  python3 ./draw/plot_system_comparison.py ${RESULTS_DIR}
+  echo "[$(date)] Plots generated in: ${RESULTS_DIR}/figures/"
 else
   echo "Warning: plot_system_comparison.py not found, skipping visualization"
 fi
@@ -528,13 +558,13 @@ echo "######################################"
 echo "#   所有实验完成!                    #"
 echo "######################################"
 echo ""
-echo "结果保存在: ${OUTPUT_DIR}"
+echo "结果保存在: ${RESULTS_DIR}"
 echo ""
 echo "生成的文件:"
-ls -lh ${OUTPUT_DIR}/*.csv
+ls -lh ${RESULTS_DIR}/*.csv
 
 echo ""
 echo "可以使用以下命令查看结果:"
-echo "  cat ${OUTPUT_DIR}/exp1_search_latency_*.csv"
-echo "  cat ${OUTPUT_DIR}/exp2_update_throughput_*.csv"
-echo "  cat ${OUTPUT_DIR}/exp3_concurrent_*.csv"
+echo "  cat ${RESULTS_DIR}/exp1_search_latency_*.csv"
+echo "  cat ${RESULTS_DIR}/exp2_update_throughput_*.csv"
+echo "  cat ${RESULTS_DIR}/exp3_concurrent_*.csv"

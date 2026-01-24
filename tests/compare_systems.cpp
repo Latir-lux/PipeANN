@@ -37,6 +37,7 @@
 #include "utils.h"
 
 #include <filesystem>
+#include <system_error>
 
 // 系统类型枚举
 enum SystemType {
@@ -193,6 +194,51 @@ void get_memory_usage(double &rss_kb, double &vm_kb) {
   long page_size_kb = sysconf(_SC_PAGE_SIZE) / 1024;
   rss_kb = resident * page_size_kb;
   vm_kb = tSize * page_size_kb;
+}
+
+uint64_t get_directory_size(const std::filesystem::path &dir_path) {
+  std::error_code ec;
+  uint64_t total = 0;
+  for (auto const &entry : std::filesystem::recursive_directory_iterator(dir_path, ec)) {
+    if (ec) {
+      return total;
+    }
+    if (entry.is_regular_file(ec)) {
+      total += entry.file_size(ec);
+    }
+  }
+  return total;
+}
+
+uint64_t get_disk_usage_bytes(const std::string &index_prefix) {
+  std::filesystem::path prefix_path(index_prefix);
+  std::filesystem::path dir = prefix_path.parent_path();
+  std::string prefix_name = prefix_path.filename().string();
+
+  if (dir.empty()) {
+    dir = ".";
+  }
+  if (!std::filesystem::exists(dir)) {
+    return 0;
+  }
+
+  uint64_t total = 0;
+  std::error_code ec;
+  for (auto const &entry : std::filesystem::directory_iterator(dir, ec)) {
+    if (ec) {
+      break;
+    }
+    const std::string name = entry.path().filename().string();
+    if (name.rfind(prefix_name, 0) != 0) {
+      continue;
+    }
+    if (entry.is_regular_file(ec)) {
+      total += entry.file_size(ec);
+    } else if (entry.is_directory(ec)) {
+      total += get_directory_size(entry.path());
+    }
+  }
+  return total;
 }
 
 /**
@@ -387,7 +433,7 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
                                const std::string &output_file) {
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
-    ofs << "system,time_sec,num_inserts,throughput_ops,memory_rss_mb,merge_triggered\n";
+    ofs << "system,time_sec,num_inserts,throughput_ops,memory_rss_mb,disk_usage_mb,merge_triggered\n";
   }
 
   std::atomic<uint64_t> insert_count(0);
@@ -434,9 +480,10 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
 
       double rss_kb, vm_kb;
       get_memory_usage(rss_kb, vm_kb);
+      double disk_mb = static_cast<double>(get_disk_usage_bytes(index._disk_index_prefix_in)) / (1024.0 * 1024.0);
 
       ofs << system_names[system_type] << "," << elapsed_sec << "," << current_inserts << "," << throughput << ","
-          << (rss_kb / 1024.0) << "," << (merge_done.load() ? 1 : 0) << "\n";
+          << (rss_kb / 1024.0) << "," << disk_mb << "," << (merge_done.load() ? 1 : 0) << "\n";
       ofs.flush();
 
       if (current_inserts >= num_inserts) {
@@ -473,7 +520,7 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
                                     SystemType system_type, const std::string &output_file) {
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
-    ofs << "system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb\n";
+    ofs << "system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb,disk_usage_mb\n";
   }
 
   std::atomic<uint64_t> search_count(0);
@@ -589,9 +636,10 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
 
       double rss_kb, vm_kb;
       get_memory_usage(rss_kb, vm_kb);
+      double disk_mb = static_cast<double>(get_disk_usage_bytes(index._disk_index_prefix_in)) / (1024.0 * 1024.0);
 
       ofs << system_names[system_type] << "," << elapsed_sec << "," << search_qps << "," << p99_lat << "," << inserts
-          << "," << insert_tput << "," << (rss_kb / 1024.0) << "\n";
+          << "," << insert_tput << "," << (rss_kb / 1024.0) << "," << disk_mb << "\n";
       ofs.flush();
 
       if ((duration_sec > 0 && elapsed_sec >= duration_sec) || inserts >= insert_num) {

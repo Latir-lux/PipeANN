@@ -3,7 +3,7 @@
 # 运行DC-PDI、IP-DiskANN和FreshDiskANN的对比实验
 #
 # 使用方法:
-#   ./scripts/run_system_comparison.sh [experiment] [dataset] [base_dir] [output_dir] [exp2_base_ratio] [exp2_update_rate] [exp2_duration_sec] [exp3_base_ratio] [exp3_update_ratio] [exp3_duration_sec]
+#   ./scripts/run_system_comparison.sh [experiment] [dataset] [base_dir] [output_dir] [exp2_base_ratio] [exp2_update_rate] [exp2_duration_sec] [exp3_base_ratio] [exp3_update_ratio] [exp3_duration_sec] [exp2_update_ratio] [exp1_query_ratio]
 #
 # 参数:
 #   experiment: 1/2/3/all (默认: all)
@@ -13,6 +13,8 @@
 #   exp2_base_ratio: 实验2基础索引占比 (默认: 0.5)
 #   exp2_update_rate: 实验2更新速率(向量/秒, 0=不限制) (默认: 0)
 #   exp2_duration_sec: 实验2持续时间(秒, 0=全量更新) (默认: 0)
+#   exp2_update_ratio: 实验2更新集占比(在剩余更新集中取比例, 默认: 1.0)
+#   exp1_query_ratio: 实验1查询集占比(默认: 1.0)
 
 set -e
 
@@ -27,6 +29,8 @@ EXP2_DURATION_SEC=${7:-"0"}
 EXP3_BASE_RATIO=${8:-"0.5"}
 EXP3_UPDATE_RATIO=${9:-"0.5"}
 EXP3_DURATION_SEC=${10:-"120"}
+EXP2_UPDATE_RATIO=${11:-${EXP2_UPDATE_RATIO:-"1.0"}}
+EXP1_QUERY_RATIO=${12:-${EXP1_QUERY_RATIO:-"1.0"}}
 NUM_THREADS=32
 RECALL_AT=10
 
@@ -81,6 +85,8 @@ echo "Experiment: $EXPERIMENT"
 echo "Exp2 base ratio: $EXP2_BASE_RATIO"
 echo "Exp2 update rate: $EXP2_UPDATE_RATE"
 echo "Exp2 duration sec: $EXP2_DURATION_SEC"
+echo "Exp2 update ratio: $EXP2_UPDATE_RATIO"
+echo "Exp1 query ratio: $EXP1_QUERY_RATIO"
 echo "Exp3 base ratio: $EXP3_BASE_RATIO"
 echo "Exp3 update ratio: $EXP3_UPDATE_RATIO"
 echo "Exp3 duration sec: $EXP3_DURATION_SEC"
@@ -106,6 +112,14 @@ link_or_copy() {
   fi
 }
 
+# 确保索引输出目录存在
+ensure_index_dir() {
+  local index_prefix=$1
+  local index_dir
+  index_dir=$(dirname "${index_prefix}")
+  mkdir -p "${index_dir}"
+}
+
 # 清理系统专用索引文件
 cleanup_system_index() {
   local system_index=$1
@@ -129,6 +143,7 @@ prepare_index() {
   # 如果索引不存在，先构建
   if [ ! -f "${index_base}_disk.index" ]; then
     echo "Building disk index..." >&2
+    ensure_index_dir "${index_base}"
     ./build/tests/build_disk_index ${DATA_TYPE} ${DATA_FILE} ${index_base} \
       96 128 32 256 ${NUM_THREADS} l2 pq >&2
   fi
@@ -168,11 +183,12 @@ run_search_latency_exp() {
   echo "实验1: 搜索延迟分布测试 - ${system_name}"
   echo "========================================"
   
+  prepare_exp1_query_data ${QUERY_FILE} ${GT_FILE} ${DATA_TYPE} ${EXP1_QUERY_RATIO}
   local system_index=$(prepare_index ${system_name} ${system_type} "${INDEX_BASE}" true)
   local output_file="${RESULTS_DIR}/exp1_search_latency_${system_name}.csv"
   
   echo "[$(date)] Running search latency test for ${system_name}..."
-  ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
+  ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${EXP1_QUERY_FILE} ${EXP1_GT_FILE} \
     ${INSERT_FILE} ${system_type} 1 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES}
   
   echo "[$(date)] Search latency test completed: ${output_file}"
@@ -206,8 +222,9 @@ prepare_exp2_data() {
   local data_file=$1
   local data_type=$2
   local base_ratio=$3
-  local update_rate=$4
-  local duration_sec=$5
+  local update_ratio=$4
+  local update_rate=$5
+  local duration_sec=$6
 
   local data_ext="${data_file##*.}"
   local data_prefix="${data_file%.*}"
@@ -248,8 +265,8 @@ with open(data_file, "rb") as f:
     npts, dim = struct.unpack("<ii", header)
 
 base_pts = int(npts * base_ratio)
-update_pts = int(npts * update_ratio)
 remaining = max(0, npts - base_pts)
+update_pts = int(remaining * update_ratio)
 if update_pts > remaining:
     update_pts = remaining
 
@@ -281,6 +298,68 @@ print(update_file)
 PY
     EXP2_BASE_FILE=${base_file}
     EXP2_UPDATE_FILE=${update_file}
+  fi
+
+  if [ "${update_ratio}" != "1" ]; then
+    local ratio_target
+    local update_total
+    read -r ratio_target update_total <<<$(python3 - <<PY
+import struct
+
+ratio = float("${update_ratio}")
+with open("${EXP2_UPDATE_FILE}", "rb") as f:
+    header = f.read(8)
+    if len(header) != 8:
+        raise SystemExit("Invalid update file header")
+    npts, _ = struct.unpack("<ii", header)
+target = int(max(0, ratio * float(npts)))
+print(target, npts)
+PY
+)
+    if [ "${ratio_target}" -gt 0 ] && [ "${ratio_target}" -lt "${update_total}" ]; then
+      local ratio_tag
+      ratio_tag=$(python3 - <<PY
+ratio=float("${update_ratio}")
+print(int(round(ratio * 100)))
+PY
+)
+      local ratio_file="${data_prefix}_exp2_update${base_pct}_ratio${ratio_tag}.${data_ext}"
+      if [ ! -f "${ratio_file}" ]; then
+        python3 - <<PY
+import struct
+
+src_file = "${EXP2_UPDATE_FILE}"
+dst_file = "${ratio_file}"
+target = int("${ratio_target}")
+data_type = "${data_type}"
+
+dtype_size = {"uint8": 1, "int8": 1, "float": 4}.get(data_type)
+if dtype_size is None:
+    raise SystemExit(f"Unsupported data type: {data_type}")
+
+with open(src_file, "rb") as src:
+    header = src.read(8)
+    if len(header) != 8:
+        raise SystemExit(f"Invalid data file header: {src_file}")
+    npts, dim = struct.unpack("<ii", header)
+    target = min(target, npts)
+    if target <= 0:
+        raise SystemExit("Target inserts must be > 0")
+    with open(dst_file, "wb") as dst:
+        dst.write(struct.pack("<ii", target, dim))
+        remaining_bytes = target * dim * dtype_size
+        buf_size = 1024 * 1024
+        while remaining_bytes > 0:
+            to_read = min(buf_size, remaining_bytes)
+            chunk = src.read(to_read)
+            if not chunk:
+                raise SystemExit(f"Unexpected EOF while reading {src_file}")
+            dst.write(chunk)
+            remaining_bytes -= len(chunk)
+PY
+      fi
+      EXP2_UPDATE_FILE=${ratio_file}
+    fi
   fi
 
   if [ "${update_rate}" != "0" ] && [ "${duration_sec}" != "0" ]; then
@@ -331,6 +410,129 @@ PY
       EXP2_UPDATE_FILE=${capped_file}
     fi
   fi
+}
+
+prepare_exp1_query_data() {
+  local query_file=$1
+  local gt_file=$2
+  local data_type=$3
+  local query_ratio=$4
+
+  if [ "${query_ratio}" = "1" ]; then
+    EXP1_QUERY_FILE=${query_file}
+    EXP1_GT_FILE=${gt_file}
+    return
+  fi
+
+  local query_ext="${query_file##*.}"
+  local query_prefix="${query_file%.*}"
+  local gt_ext="${gt_file##*.}"
+  local gt_prefix="${gt_file%.*}"
+
+  local ratio_tag
+  ratio_tag=$(python3 - <<PY
+ratio=float("${query_ratio}")
+print(int(round(ratio * 100)))
+PY
+)
+
+  local query_out="${query_prefix}_exp1_q${ratio_tag}.${query_ext}"
+  local gt_out="${gt_prefix}_exp1_q${ratio_tag}.${gt_ext}"
+
+  if [ ! -f "${query_out}" ]; then
+    python3 - <<PY
+import struct
+
+src_file = "${query_file}"
+dst_file = "${query_out}"
+ratio = float("${query_ratio}")
+data_type = "${data_type}"
+
+dtype_size = {"uint8": 1, "int8": 1, "float": 4}.get(data_type)
+if dtype_size is None:
+    raise SystemExit(f"Unsupported data type: {data_type}")
+
+with open(src_file, "rb") as src:
+    header = src.read(8)
+    if len(header) != 8:
+        raise SystemExit(f"Invalid query file header: {src_file}")
+    npts, dim = struct.unpack("<ii", header)
+    target = int(max(1, npts * ratio))
+    target = min(target, npts)
+
+    with open(dst_file, "wb") as dst:
+        dst.write(struct.pack("<ii", target, dim))
+        remaining_bytes = target * dim * dtype_size
+        buf_size = 1024 * 1024
+        while remaining_bytes > 0:
+            to_read = min(buf_size, remaining_bytes)
+            chunk = src.read(to_read)
+            if not chunk:
+                raise SystemExit(f"Unexpected EOF while reading {src_file}")
+            dst.write(chunk)
+            remaining_bytes -= len(chunk)
+PY
+  fi
+
+  if [ ! -f "${gt_out}" ]; then
+    python3 - <<PY
+import os
+import struct
+
+src_file = "${gt_file}"
+dst_file = "${gt_out}"
+ratio = float("${query_ratio}")
+
+file_size = os.path.getsize(src_file)
+if file_size < 8:
+    raise SystemExit(f"Invalid groundtruth file: {src_file}")
+
+with open(src_file, "rb") as src:
+    header = src.read(8)
+    npts, dim = struct.unpack("<ii", header)
+    if npts > 0 and dim > 0 and (file_size - 8) % npts == 0:
+        record_size = (file_size - 8) // npts
+        target = int(max(1, npts * ratio))
+        target = min(target, npts)
+        with open(dst_file, "wb") as dst:
+            dst.write(struct.pack("<ii", target, dim))
+            remaining_bytes = target * record_size
+            buf_size = 1024 * 1024
+            while remaining_bytes > 0:
+                to_read = min(buf_size, remaining_bytes)
+                chunk = src.read(to_read)
+                if not chunk:
+                    raise SystemExit(f"Unexpected EOF while reading {src_file}")
+                dst.write(chunk)
+                remaining_bytes -= len(chunk)
+    else:
+        src.seek(0)
+        dim_raw = src.read(4)
+        if len(dim_raw) != 4:
+            raise SystemExit(f"Invalid ivecs header in {src_file}")
+        dim = struct.unpack("<i", dim_raw)[0]
+        record_size = (dim + 1) * 4
+        if file_size % record_size != 0:
+            raise SystemExit(f"Unsupported groundtruth format: {src_file}")
+        npts = file_size // record_size
+        target = int(max(1, npts * ratio))
+        target = min(target, npts)
+        src.seek(0)
+        with open(dst_file, "wb") as dst:
+            remaining_bytes = target * record_size
+            buf_size = 1024 * 1024
+            while remaining_bytes > 0:
+                to_read = min(buf_size, remaining_bytes)
+                chunk = src.read(to_read)
+                if not chunk:
+                    raise SystemExit(f"Unexpected EOF while reading {src_file}")
+                dst.write(chunk)
+                remaining_bytes -= len(chunk)
+PY
+  fi
+
+  EXP1_QUERY_FILE=${query_out}
+  EXP1_GT_FILE=${gt_out}
 }
 
 # 准备实验3的数据分片（按比例拆分）
@@ -443,7 +645,7 @@ run_concurrent_exp() {
   echo "[$(date)] Running concurrent test for ${system_name} (${duration_sec}s)..."
   ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
     ${insert_file} ${system_type} 3 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES} \
-    --exp3-duration-sec ${duration_sec} --exp3-update-ratio ${EXP3_UPDATE_RATIO}
+    --exp3-duration-sec ${duration_sec} --exp3-update-ratio 1.0
   
   echo "[$(date)] Concurrent test completed: ${output_file}"
   cleanup_system_index ${system_index}
@@ -506,13 +708,14 @@ fi
 if should_run "2"; then
   echo ""
   echo ">>> 开始实验2: 更新吞吐量测试 <<<"
-  prepare_exp2_data ${DATA_FILE} ${DATA_TYPE} ${EXP2_BASE_RATIO} ${EXP2_UPDATE_RATE} ${EXP2_DURATION_SEC}
+  prepare_exp2_data ${DATA_FILE} ${DATA_TYPE} ${EXP2_BASE_RATIO} ${EXP2_UPDATE_RATIO} ${EXP2_UPDATE_RATE} ${EXP2_DURATION_SEC}
 
   EXP2_BASE_TAG=$(printf "%s" "${EXP2_BASE_RATIO}" | tr '.' 'p')
   EXP2_INDEX_BASE="${INDEX_BASE}_exp2_base${EXP2_BASE_TAG}"
 
   if [ ! -f "${EXP2_INDEX_BASE}_disk.index" ]; then
     echo "Building exp2 base index..." >&2
+    ensure_index_dir "${EXP2_INDEX_BASE}"
     ./build/tests/build_disk_index ${DATA_TYPE} ${EXP2_BASE_FILE} ${EXP2_INDEX_BASE} \
       96 128 32 256 ${NUM_THREADS} l2 pq >&2
   fi
@@ -533,6 +736,7 @@ if should_run "3"; then
 
   if [ ! -f "${EXP3_INDEX_BASE}_disk.index" ]; then
     echo "Building exp3 base index..." >&2
+    ensure_index_dir "${EXP3_INDEX_BASE}"
     ./build/tests/build_disk_index ${DATA_TYPE} ${EXP3_BASE_FILE} ${EXP3_INDEX_BASE} \
       96 128 32 256 ${NUM_THREADS} l2 pq >&2
   fi

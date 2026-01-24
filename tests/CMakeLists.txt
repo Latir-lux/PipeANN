@@ -46,3 +46,11 @@ target_link_libraries(thesis_benchmark ${PROJECT_NAME})
 # 系统对比测试程序 (DC-PDI vs IP-DiskANN vs FreshDiskANN)
 add_executable(compare_systems compare_systems.cpp)
 target_link_libraries(compare_systems ${PROJECT_NAME})
+
+# 消融实验程序 (exp-chapter4and3-3)
+# 实验1: 动态聚类消融 (拓扑感知分配 vs 随机分配)
+# 实验2: 重组织机制消融 (有无后台重组织)
+# 实验3: 流水线消融 (PIPE_SEARCH vs BEAM_SEARCH)
+# 实验4: 并发扩展性测试
+add_executable(ablation_study ablation_study.cpp)
+target_link_libraries(ablation_study ${PROJECT_NAME})

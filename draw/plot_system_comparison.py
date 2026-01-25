@@ -144,7 +144,12 @@ def plot_search_latency_comparison(
 
     for idx, (metric_key, ylabel, scale) in enumerate(metrics):
         ax = axes[idx // 2, idx % 2]
+        has_data = False
         for system_name, df in data.items():
+            # 检查列是否存在
+            if metric_key not in df.columns:
+                continue
+            has_data = True
             if system_name == "DC-PDI":
                 reorg_mask = (
                     df.get("reorg_running", pd.Series([0] * len(df))).astype(int) == 1
@@ -157,14 +162,15 @@ def plot_search_latency_comparison(
                     linewidth=1.8,
                     label="DC-PDI (normal)" if idx == 0 else None,
                 )
-                ax.plot(
-                    df.loc[reorg_mask, "time_sec"],
-                    df.loc[reorg_mask, metric_key] / scale,
-                    color=dc_reorg_color,
-                    linestyle="-",
-                    linewidth=1.8,
-                    label="DC-PDI (reorg)" if idx == 0 else None,
-                )
+                if reorg_mask.any():
+                    ax.plot(
+                        df.loc[reorg_mask, "time_sec"],
+                        df.loc[reorg_mask, metric_key] / scale,
+                        color=dc_reorg_color,
+                        linestyle="-",
+                        linewidth=1.8,
+                        label="DC-PDI (reorg)" if idx == 0 else None,
+                    )
             else:
                 ax.plot(
                     df["time_sec"],
@@ -180,6 +186,8 @@ def plot_search_latency_comparison(
         ax.grid(True, alpha=0.3)
         if idx == 0:
             ax.legend(fontsize=10)
+        if not has_data:
+            ax.text(0.5, 0.5, "数据不可用", ha="center", va="center", transform=ax.transAxes, fontsize=12)
 
     if dataset_label:
         fig.suptitle(f"{dataset_label}", fontsize=15, fontweight="bold")

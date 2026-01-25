@@ -211,26 +211,40 @@ namespace pipeann {
     // DC-PDI优化: 使用on_flight_set快速判断节点是否在发送中
     tsl::robin_set<unsigned> on_flight_set;
     on_flight_set.reserve(beam_width * 2);
+    
+    // DC-PDI: 记录上一轮发送时的marker位置，用于模拟beam_search的num_seen限制
+    unsigned last_send_marker = 0;
 
-    // DC-PDI优化: 重构为批量发送I/O请求，减少锁开销
-    // 使用k指针避免从头遍历
-    auto send_batch_read_req = [&](uint32_t n) -> unsigned {
+    // DC-PDI优化: 重构为批量发送I/O请求，模仿beam_search的frontier选择策略
+    // 关键改进：添加num_seen计数器，限制每轮查看的节点数量
+    auto send_batch_read_req = [&](uint32_t n, bool new_round) -> unsigned {
       if (n == 0) return 0;
       
-      // 1. 从k开始收集需要发送的节点
+      // 如果是新一轮（处理完节点后），重置marker
+      unsigned marker = new_round ? k : last_send_marker;
+      
+      // 1. 从marker开始收集需要发送的节点，模仿beam_search的num_seen策略
       std::vector<std::pair<unsigned, Neighbor*>> to_send;
       to_send.reserve(n);
-      unsigned marker = k;
-      while (marker < cur_list_size && to_send.size() < n) {
+      uint32_t num_seen = 0;  // 关键：模仿beam_search的num_seen
+      
+      while (marker < cur_list_size && to_send.size() < n && num_seen < beam_width) {
         auto& node = retset[marker];
-        // 检查节点: 未访问 + 不在飞行中 + 未在id_buf_map中
-        if (!node.visited && on_flight_set.find(node.id) == on_flight_set.end() 
-            && id_buf_map.find(node.id) == id_buf_map.end()) {
-          to_send.push_back({marker, &node});
-          on_flight_set.insert(node.id);
+        // 使用flag来标记节点是否已被考虑（类似beam_search）
+        if (node.flag && !node.visited) {
+          num_seen++;  // 每看一个有效候选就计数
+          // 检查节点: 不在飞行中 + 未在id_buf_map中
+          if (on_flight_set.find(node.id) == on_flight_set.end() 
+              && id_buf_map.find(node.id) == id_buf_map.end()) {
+            to_send.push_back({marker, &node});
+            on_flight_set.insert(node.id);
+          }
+          node.flag = false;  // 标记为已考虑（关键！）
         }
         ++marker;
       }
+      
+      last_send_marker = marker;  // 记录位置，下次继续
       
       if (to_send.empty()) return 0;
       
@@ -343,8 +357,8 @@ namespace pipeann {
     std::ignore = print_state;
 
     auto cpu2_st = std::chrono::high_resolution_clock::now();
-    // 初始发送I/O请求
-    send_batch_read_req(beam_width);
+    // 初始发送I/O请求（第一轮，new_round=true）
+    send_batch_read_req(beam_width, true);
     
 #ifdef OVERLAP_INIT
     if (likely(mem_L != 0)) {
@@ -357,28 +371,33 @@ namespace pipeann {
     }
 #endif
 
-    // DC-PDI优化: 主循环使用k指针单调递增，类似beam_search
-    // 循环条件: 还有未访问的节点 或 还有飞行中的I/O
+    // DC-PDI优化: 主循环模仿beam_search的逻辑
+    // 每处理完一个节点后，检查是否需要开始新一轮
+    bool need_new_round = false;
     while (k < cur_list_size || !on_flight_ios.empty()) {
       // 1. 轮询已完成的I/O
       poll_all();
       
-      // 2. 发送新的I/O请求，保持队列满载
-      if (on_flight_ios.size() < beam_width) {
-        send_batch_read_req(beam_width - on_flight_ios.size());
-      }
-      
-      // 3. 处理已读取的节点
+      // 2. 处理已读取的节点
       unsigned nk = calc_best_node();
       
-      // 4. 更新k指针（类似beam_search的收敛检测）
+      // 3. 更新k指针（类似beam_search的收敛检测）
       if (nk <= k) {
         k = nk;  // 发现更好的节点，回退k
+        need_new_round = true;  // 需要重新从k开始发送
+        last_send_marker = k;
       } else {
         // 尝试推进k到下一个未访问的节点
         while (k < cur_list_size && retset[k].visited) {
           ++k;
         }
+      }
+      
+      // 4. 发送新的I/O请求
+      // 如果k回退了，开始新一轮；否则继续上一轮
+      if (on_flight_ios.size() < beam_width) {
+        send_batch_read_req(beam_width - on_flight_ios.size(), need_new_round);
+        need_new_round = false;
       }
       
       // 5. 如果没有飞行中的I/O且无法发送新请求，检查是否收敛

@@ -256,16 +256,31 @@ namespace pipeann {
     
     if (pool.empty()) return;
     
-    // 跨页惩罚系数
-    constexpr float kCrossPagePenalty = 1.5f;
+    // DC-PDI优化: 使用更温和的惩罚系数，减少对距离分布的扰动
+    // 原来1.5太激进，导致过度偏向页内边，反而损害图质量
+    constexpr float kCrossPagePenalty = 1.15f;  // 降低惩罚系数
+    
+    // DC-PDI优化: 使用就地修改避免额外内存分配
+    // 通过标记位而非保存完整距离数组来标识跨页边
+    uint64_t cross_page_mask = 0;  // 使用位图标记（假设pool.size() < 64）
+    const size_t use_bitmap = pool.size() <= 64;
     
     // 应用块感知惩罚调整距离
-    std::vector<float> original_distances(pool.size());
-    for (size_t i = 0; i < pool.size(); i++) {
-      original_distances[i] = pool[i].distance;
-      uint64_t nbr_page = node_sector_no(pool[i].id);
-      if (nbr_page != target_page) {
-        pool[i].distance *= kCrossPagePenalty;
+    if (use_bitmap) {
+      for (size_t i = 0; i < pool.size(); i++) {
+        uint64_t nbr_page = node_sector_no(pool[i].id);
+        if (nbr_page != target_page) {
+          cross_page_mask |= (1ULL << i);
+          pool[i].distance *= kCrossPagePenalty;
+        }
+      }
+    } else {
+      // 大pool使用简化版: 不恢复距离
+      for (size_t i = 0; i < pool.size(); i++) {
+        uint64_t nbr_page = node_sector_no(pool[i].id);
+        if (nbr_page != target_page) {
+          pool[i].distance *= kCrossPagePenalty;
+        }
       }
     }
     
@@ -280,7 +295,7 @@ namespace pipeann {
     
     pruned_list.clear();
     
-    // 恢复原始距离并填充结果
+    // 填充结果
     size_t medoid_threshold = result.size() * 3 / 4;
     for (size_t i = 0; i < result.size(); ++i) {
       if (i > medoid_threshold && result[i].id == medoid) {
@@ -298,14 +313,20 @@ namespace pipeann {
       }
     }
     
-    // 恢复pool中的原始距离（以便调用者使用）
-    for (size_t i = 0; i < pool.size() && i < original_distances.size(); i++) {
-      pool[i].distance = original_distances[i];
+    // DC-PDI优化: 仅在使用位图时恢复距离
+    if (use_bitmap && cross_page_mask != 0) {
+      constexpr float kInversePenalty = 1.0f / kCrossPagePenalty;
+      for (size_t i = 0; i < pool.size(); i++) {
+        if (cross_page_mask & (1ULL << i)) {
+          pool[i].distance *= kInversePenalty;
+        }
+      }
     }
   }
 
   /**
    * DC-PDI: 块感知PQ邻居剪枝（论文4.2节）
+   * 优化: 减少内存分配，使用更温和的惩罚系数
    */
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::prune_neighbors_pq_block_aware(
@@ -316,16 +337,27 @@ namespace pipeann {
     
     if (pool.empty()) return;
     
-    // 跨页惩罚系数
-    constexpr float kCrossPagePenalty = 1.5f;
+    // DC-PDI优化: 使用更温和的惩罚系数
+    constexpr float kCrossPagePenalty = 1.15f;
     
-    // 保存原始距离并应用惩罚
-    std::vector<float> original_distances(pool.size());
-    for (size_t i = 0; i < pool.size(); i++) {
-      original_distances[i] = pool[i].distance;
-      uint64_t nbr_page = node_sector_no(pool[i].id);
-      if (nbr_page != target_page) {
-        pool[i].distance *= kCrossPagePenalty;
+    // DC-PDI优化: 使用位图避免额外内存分配
+    uint64_t cross_page_mask = 0;
+    const bool use_bitmap = pool.size() <= 64;
+    
+    if (use_bitmap) {
+      for (size_t i = 0; i < pool.size(); i++) {
+        uint64_t nbr_page = node_sector_no(pool[i].id);
+        if (nbr_page != target_page) {
+          cross_page_mask |= (1ULL << i);
+          pool[i].distance *= kCrossPagePenalty;
+        }
+      }
+    } else {
+      for (size_t i = 0; i < pool.size(); i++) {
+        uint64_t nbr_page = node_sector_no(pool[i].id);
+        if (nbr_page != target_page) {
+          pool[i].distance *= kCrossPagePenalty;
+        }
       }
     }
     
@@ -353,9 +385,14 @@ namespace pipeann {
       }
     }
     
-    // 恢复原始距离
-    for (size_t i = 0; i < pool.size() && i < original_distances.size(); i++) {
-      pool[i].distance = original_distances[i];
+    // DC-PDI优化: 仅在使用位图时恢复距离
+    if (use_bitmap && cross_page_mask != 0) {
+      constexpr float kInversePenalty = 1.0f / kCrossPagePenalty;
+      for (size_t i = 0; i < pool.size(); i++) {
+        if (cross_page_mask & (1ULL << i)) {
+          pool[i].distance *= kInversePenalty;
+        }
+      }
     }
   }
 

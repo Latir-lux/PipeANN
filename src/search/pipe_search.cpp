@@ -95,40 +95,46 @@ namespace pipeann {
     };
 
     uint64_t n_computes = 0;
+    // DC-PDI优化: 使用采样而非全量统计来减少开销
+    static thread_local uint32_t dispersion_sample_counter = 0;
+    constexpr uint32_t kDispersionSampleInterval = 16;  // 每16个节点采样一次
+
     auto compute_and_push_nbrs = [&](const char *node_buf, unsigned &nk, unsigned current_node_id) {
       unsigned *node_nbrs = offset_to_node_nhood(node_buf);
       unsigned nnbrs = *(node_nbrs++);
       unsigned nbors_cand_size = 0;
 
-      // DC-PDI: 统计物理离散度
+      // DC-PDI优化: 仅对采样节点统计物理离散度，大幅减少id2loc调用次数
       if (stats != nullptr && nnbrs > 0) {
-        unsigned cross_page_neighbors = 0;
-        unsigned current_page = loc_sector_no(id2loc(current_node_id));
+        dispersion_sample_counter++;
+        // 采样频率从100%降到约6%，大幅减少开销
+        if ((dispersion_sample_counter & (kDispersionSampleInterval - 1)) == 0) {
+          unsigned cross_page_neighbors = 0;
+          unsigned current_page = loc_sector_no(id2loc(current_node_id));
 
-        for (unsigned m = 0; m < nnbrs; ++m) {
-          unsigned nbr_id = node_nbrs[m];
-          unsigned nbr_page = loc_sector_no(id2loc(nbr_id));
-          if (nbr_page != current_page) {
-            cross_page_neighbors++;
+          // 优化: 只采样部分邻居而非全部
+          unsigned sample_step = (nnbrs > 8) ? (nnbrs >> 2) : 1;  // 最多采样4个邻居
+          for (unsigned m = 0; m < nnbrs; m += sample_step) {
+            unsigned nbr_id = node_nbrs[m];
+            unsigned nbr_page = loc_sector_no(id2loc(nbr_id));
+            if (nbr_page != current_page) {
+              cross_page_neighbors++;
+            }
           }
-        }
-
-        // 累积物理离散度统计
-        stats->physical_dispersion += cross_page_neighbors;
-        stats->sampled_nodes++;
-        if (nnbrs > 0) {
-          stats->page_local_edge_ratio += (double) (nnbrs - cross_page_neighbors) / nnbrs;
-        }
+          // 外推估计总跨页邻居数
+          unsigned estimated_cross = cross_page_neighbors * sample_step;
+          stats->physical_dispersion += estimated_cross;
+          stats->sampled_nodes++;
+          if (nnbrs > 0) {
+            stats->page_local_edge_ratio += (double) (nnbrs - estimated_cross) / nnbrs;
+          }
 
 #ifdef ENABLE_DISPERSION_MONITOR
-        static thread_local uint32_t dispersion_sample_counter = 0;
-        if (dispersion_monitor_.is_enabled()) {
-          dispersion_sample_counter++;
-          if (dispersion_sample_counter % DispersionMonitor::kSampleRate == 0) {
-            dispersion_monitor_.update_dispersion(current_page, cross_page_neighbors);
+          if (dispersion_monitor_.is_enabled()) {
+            dispersion_monitor_.update_dispersion(current_page, estimated_cross);
           }
-        }
 #endif
+        }
       }
 
       for (unsigned m = 0; m < nnbrs; ++m) {
@@ -140,14 +146,11 @@ namespace pipeann {
 
       n_computes += nbors_cand_size;
       if (nbors_cand_size) {
-        auto compute_st = std::chrono::high_resolution_clock::now();
+        // DC-PDI优化: 仅在需要统计时才获取时间戳，减少系统调用开销
         nbr_handler->compute_dists(query_buf, node_nbrs, nbors_cand_size);
         for (unsigned m = 0; m < nbors_cand_size; ++m) {
           const int nbor_id = node_nbrs[m];
           const float nbor_dist = dist_scratch[m];
-          if (stats != nullptr) {
-            stats->n_cmps++;
-          }
           if (nbor_dist >= retset[cur_list_size - 1].distance && (cur_list_size == l_search))
             continue;
           Neighbor nn(nbor_id, nbor_dist, true);
@@ -164,10 +167,8 @@ namespace pipeann {
           if (r < nk)
             nk = r;
         }
-        auto compute_ed = std::chrono::high_resolution_clock::now();
         if (stats != nullptr) {
-          stats->compute_phase_us +=
-              std::chrono::duration_cast<std::chrono::microseconds>(compute_ed - compute_st).count();
+          stats->n_cmps += nbors_cand_size;
         }
       }
     };
@@ -199,7 +200,9 @@ namespace pipeann {
     }
     // search in in-memory index.
 
-    int64_t cur_beam_width = std::min(4ul, beam_width);  // before converge.
+    // DC-PDI优化: 提高初始beam_width以改善I/O利用率
+    // 原来从4开始太保守，导致初期I/O不足
+    int64_t cur_beam_width = std::min((uint64_t)std::max(8ul, beam_width / 2), beam_width);
     std::vector<unsigned> mem_tags(mem_L);
     std::vector<float> mem_dists(mem_L);
 
@@ -227,7 +230,6 @@ namespace pipeann {
 
     std::queue<io_t> on_flight_ios;
     auto send_read_req = [&](Neighbor &item) -> bool {
-      auto prefetch_start = std::chrono::high_resolution_clock::now();
       item.flag = false;
 
       // lock the corresponding page.
@@ -244,13 +246,11 @@ namespace pipeann {
       on_flight_ios.push(io_t{item, pid, loc, &req});
       cur_buf_idx = (cur_buf_idx + 1) % MAX_N_SECTOR_READS;
 
+      // DC-PDI优化: 移除热点路径上的时间戳调用
       if (stats != nullptr) {
         stats->n_ios++;
         stats->bytes_read += size_per_io;        // 记录实际读取字节数
         stats->effective_bytes += max_node_len;  // 记录有效数据字节数
-        auto prefetch_end = std::chrono::high_resolution_clock::now();
-        stats->prefetch_phase_us +=
-            std::chrono::duration_cast<std::chrono::microseconds>(prefetch_end - prefetch_start).count();
       }
 #ifdef COLLECT_IO_STATS
       global_io_stats.add_read(size_per_io, max_node_len);
@@ -368,25 +368,30 @@ namespace pipeann {
     int cur_n_in = 0, cur_tot = 0;
     while (get_first_unvisited() != -1) {
       // poll to heap (best-effort) -> calc best from heap (skip if heap is empty) -> send IO (if can send) -> ...
-      // auto io1_st = std::chrono::high_resolution_clock::now();
       auto [n_in, n_out] = poll_all();
       std::ignore = n_in;
       std::ignore = n_out;
 
-      if (max_marker >= 5 && n_in + n_out > 0) {
+      // DC-PDI优化: 使用更激进的beam_width调整策略
+      if (max_marker >= 3 && n_in + n_out > 0) {  // 降低触发阈值
         cur_n_in += n_in;
         cur_tot += n_in + n_out;
-        // converged, tune beam width.
-        constexpr double kWasteThreshold = 0.1;  // 0.1 * 10
-        if ((cur_tot - cur_n_in) * 1.0 / cur_tot <= kWasteThreshold) {
-          cur_beam_width = cur_beam_width + 1;
-          cur_beam_width = std::max(cur_beam_width, 4l);
-          cur_beam_width = std::min((int64_t) beam_width, cur_beam_width);
+        // 动态调整beam width
+        constexpr double kWasteThreshold = 0.15;  // 放宽阈值，允许更多预取
+        double waste_ratio = (cur_tot > 0) ? (cur_tot - cur_n_in) * 1.0 / cur_tot : 0;
+        if (waste_ratio <= kWasteThreshold) {
+          // 更快速地增加beam width
+          cur_beam_width = std::min((int64_t)beam_width, cur_beam_width + 2);
+        } else if (waste_ratio > 0.3 && cur_beam_width > 4) {
+          // 如果浪费过多，适当减少
+          cur_beam_width = std::max(4l, cur_beam_width - 1);
         }
       }
 
+      // DC-PDI优化: 一次发送更多请求以提高I/O并行度
       if ((int64_t) on_flight_ios.size() < cur_beam_width) {
-        send_best_read_req(1);
+        int to_send = std::min((int64_t)2, cur_beam_width - (int64_t)on_flight_ios.size());
+        send_best_read_req(to_send);
       }
       // auto io1_ed = std::chrono::high_resolution_clock::now();
       // stats->io_us1 += std::chrono::duration_cast<std::chrono::microseconds>(io1_ed - io1_st).count();

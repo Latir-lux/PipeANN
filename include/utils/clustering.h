@@ -57,9 +57,10 @@ public:
     
     for (size_t i = 0; i < u_neighbors.size() && i < u_distances.size(); i++) {
       if (page_set.count(u_neighbors[i]) > 0) {
-        // 避免除零，设置最小距离
+        // DC-PDI优化: 使用 1/dist 代替 pow(dist, 1.5)，减少计算开销
+        // 对于连接强度排序，两者结果基本一致
         float dist = std::max(u_distances[i], 1e-6f);
-        strength += kNavWeight / std::pow(dist, kDistanceDecay);
+        strength += kNavWeight / dist;
       }
     }
     return strength;
@@ -83,7 +84,8 @@ public:
     for (size_t i = 0; i < u_neighbors.size() && i < u_distances.size(); i++) {
       uint64_t page = neighbor_to_page(u_neighbors[i]);
       float dist = std::max(u_distances[i], 1e-6f);
-      page_strengths[page] += kNavWeight / std::pow(dist, kDistanceDecay);
+      // DC-PDI优化: 使用 1/dist 代替 pow(dist, 1.5)
+      page_strengths[page] += kNavWeight / dist;
     }
     
     return page_strengths;

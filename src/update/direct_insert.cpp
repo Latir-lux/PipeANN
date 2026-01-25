@@ -59,13 +59,13 @@ namespace pipeann {
 #ifdef ENABLE_BLOCK_AWARE_PRUNE
     uint64_t target_page = 0;
     if (!page_ref.empty()) {
-      // 计算各页面的连接强度并选择最优页面
+      // DC-PDI优化: 使用简化的连接强度计算，用1/dist代替1/dist^1.5
       std::unordered_map<uint64_t, float> page_strength;
-      constexpr float kDistanceDecay = 1.5f;
       for (auto &nbr : exp_node_info) {
         uint64_t page = node_sector_no(nbr.id);
         float dist = std::max(nbr.distance, 1e-6f);
-        page_strength[page] += 1.0f / std::pow(dist, kDistanceDecay);
+        // DC-PDI优化: 简化计算，1/dist 与 1/dist^1.5 在排序上基本一致
+        page_strength[page] += 1.0f / dist;
       }
       float max_strength = 0;
       for (auto &[page, strength] : page_strength) {

@@ -81,6 +81,7 @@ def plot_search_latency_comparison(
                     "p90_lat_us",
                     "p99_lat_us",
                     "io_amplification",
+                    "disk_usage_mb",
                 ],
             )
             system_name = system.replace("-", "-").upper()
@@ -107,6 +108,7 @@ def plot_search_latency_comparison(
         target_recall = df.get("recall_target", pd.Series([90.0])).iloc[0]
         closest_idx = (df["recall_pct"] - target_recall).abs().idxmin()
         row = df.loc[closest_idx]
+        disk_usage = row.get("disk_usage_mb", 0)
         summary_rows.append(
             {
                 "System": system_name,
@@ -116,6 +118,7 @@ def plot_search_latency_comparison(
                 "P99(ms)": row["p99_lat_us"] / 1000.0,
                 "QPS": row["search_qps"],
                 "Memory(MB)": row["memory_rss_mb"],
+                "Disk(MB)": disk_usage,
                 "MeanIOs": row["mean_ios"],
             }
         )
@@ -131,6 +134,7 @@ def plot_search_latency_comparison(
         ("p99_lat_us", "P99延迟 (ms)", 1000.0),
         ("search_qps", "吞吐量 (QPS)", 1.0),
         ("memory_rss_mb", "内存 (MB)", 1.0),
+        ("disk_usage_mb", "磁盘占用 (MB)", 1.0),
         ("mean_ios", "平均页面访问数", 1.0),
         ("recall_pct", "Recall@10 (%)", 1.0),
     ]
@@ -176,8 +180,6 @@ def plot_search_latency_comparison(
         ax.grid(True, alpha=0.3)
         if idx == 0:
             ax.legend(fontsize=10)
-
-    axes[3, 1].axis("off")
 
     if dataset_label:
         fig.suptitle(f"{dataset_label}", fontsize=15, fontweight="bold")
@@ -441,6 +443,7 @@ def generate_summary_table(
                         "p90_lat_us",
                         "p99_lat_us",
                         "mean_ios",
+                        "disk_usage_mb",
                     ],
                 )
                 if df1.empty:
@@ -451,6 +454,8 @@ def generate_summary_table(
                 row["QPS@90%"] = int(df1.loc[closest_idx, "search_qps"])
                 row["P99(ms)@90%"] = f"{df1.loc[closest_idx, 'p99_lat_us'] / 1000:.2f}"
                 row["MeanIOs@90%"] = f"{df1.loc[closest_idx, 'mean_ios']:.2f}"
+                if "disk_usage_mb" in df1.columns:
+                    row["Disk(MB)@90%"] = f"{df1.loc[closest_idx, 'disk_usage_mb']:.1f}"
             elif "recall" in df1.columns:
                 df1 = filter_outliers(
                     df1,

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include "utils/timer.h"
 #include "utils/tsl/robin_set.h"
+#include "utils/tsl/robin_map.h"
 #include "utils.h"
 #include "utils/page_cache.h"
 
@@ -95,47 +96,18 @@ namespace pipeann {
     };
 
     uint64_t n_computes = 0;
-    // DC-PDI优化: 使用采样而非全量统计来减少开销
-    static thread_local uint32_t dispersion_sample_counter = 0;
-    constexpr uint32_t kDispersionSampleInterval = 16;  // 每16个节点采样一次
+    // DC-PDI优化: 完全移除物理离散度采样，将统计开销降至零
+    // 该功能仅用于离线分析，不应在搜索热路径中启用
 
     auto compute_and_push_nbrs = [&](const char *node_buf, unsigned &nk, unsigned current_node_id) {
       unsigned *node_nbrs = offset_to_node_nhood(node_buf);
       unsigned nnbrs = *(node_nbrs++);
       unsigned nbors_cand_size = 0;
 
-      // DC-PDI优化: 仅对采样节点统计物理离散度，大幅减少id2loc调用次数
-      if (stats != nullptr && nnbrs > 0) {
-        dispersion_sample_counter++;
-        // 采样频率从100%降到约6%，大幅减少开销
-        if ((dispersion_sample_counter & (kDispersionSampleInterval - 1)) == 0) {
-          unsigned cross_page_neighbors = 0;
-          unsigned current_page = loc_sector_no(id2loc(current_node_id));
-
-          // 优化: 只采样部分邻居而非全部
-          unsigned sample_step = (nnbrs > 8) ? (nnbrs >> 2) : 1;  // 最多采样4个邻居
-          for (unsigned m = 0; m < nnbrs; m += sample_step) {
-            unsigned nbr_id = node_nbrs[m];
-            unsigned nbr_page = loc_sector_no(id2loc(nbr_id));
-            if (nbr_page != current_page) {
-              cross_page_neighbors++;
-            }
-          }
-          // 外推估计总跨页邻居数
-          unsigned estimated_cross = cross_page_neighbors * sample_step;
-          stats->physical_dispersion += estimated_cross;
-          stats->sampled_nodes++;
-          if (nnbrs > 0) {
-            stats->page_local_edge_ratio += (double) (nnbrs - estimated_cross) / nnbrs;
-          }
-
-#ifdef ENABLE_DISPERSION_MONITOR
-          if (dispersion_monitor_.is_enabled()) {
-            dispersion_monitor_.update_dispersion(current_page, estimated_cross);
-          }
-#endif
-        }
-      }
+      // DC-PDI优化: 完全禁用搜索路径上的物理离散度统计
+      // 原因: id2loc调用成本过高，即使采样也会拖慢搜索
+      // 物理离散度可以在离线批量分析时单独计算
+      std::ignore = current_node_id;  // 避免unused warning
 
       for (unsigned m = 0; m < nnbrs; ++m) {
         if (visited.find(node_nbrs[m]) == visited.end()) {
@@ -200,9 +172,9 @@ namespace pipeann {
     }
     // search in in-memory index.
 
-    // DC-PDI优化: 提高初始beam_width以改善I/O利用率
-    // 原来从4开始太保守，导致初期I/O不足
-    int64_t cur_beam_width = std::min((uint64_t)std::max(8ul, beam_width / 2), beam_width);
+    // DC-PDI优化: 直接使用用户指定的beam_width，不再保守初始化
+    // 这样可以更快地填满I/O队列，提高并行度
+    int64_t cur_beam_width = beam_width;
     std::vector<unsigned> mem_tags(mem_L);
     std::vector<float> mem_dists(mem_L);
 
@@ -229,36 +201,70 @@ namespace pipeann {
 #endif
 
     std::queue<io_t> on_flight_ios;
-    auto send_read_req = [&](Neighbor &item) -> bool {
-      item.flag = false;
+    
+    // DC-PDI优化: 使用robin_map替代std::unordered_map，提高查找性能
+    // 必须在lambda定义之前声明，因为lambda会捕获它
+    tsl::robin_map<unsigned, char *> id_buf_map;
+    id_buf_map.reserve(l_search * 2);  // 预分配空间减少rehash
 
-      // lock the corresponding page.
-      this->lock_idx(idx_lock_table, item.id, std::vector<uint32_t>(), true);
-      const unsigned loc = id2loc(item.id), pid = loc_sector_no(loc);
-
-      uint64_t &cur_buf_idx = query_buf->sector_idx;
-      auto buf = sector_scratch + cur_buf_idx * size_per_io;
-      auto &req = query_buf->reqs[cur_buf_idx];
-      req = IORequest(static_cast<uint64_t>(pid) * SECTOR_LEN, size_per_io, buf, u_loc_offset(loc), max_node_len,
-                      sector_scratch);
-      reader->send_read_no_alloc(req, ctx);
-
-      on_flight_ios.push(io_t{item, pid, loc, &req});
-      cur_buf_idx = (cur_buf_idx + 1) % MAX_N_SECTOR_READS;
-
-      // DC-PDI优化: 移除热点路径上的时间戳调用
-      if (stats != nullptr) {
-        stats->n_ios++;
-        stats->bytes_read += size_per_io;        // 记录实际读取字节数
-        stats->effective_bytes += max_node_len;  // 记录有效数据字节数
+    // DC-PDI优化: 重构为批量发送I/O请求，减少锁开销
+    // 收集多个请求后一次性加锁，然后发送所有请求
+    auto send_batch_read_req = [&](uint32_t n) -> unsigned {
+      if (n == 0) return 0;
+      
+      // 1. 收集需要发送的节点
+      std::vector<std::pair<unsigned, Neighbor*>> to_send;  // <marker, neighbor ptr>
+      to_send.reserve(n);
+      unsigned marker = 0;
+      while (marker < cur_list_size && to_send.size() < n) {
+        if (retset[marker].flag && id_buf_map.find(retset[marker].id) == id_buf_map.end()) {
+          to_send.push_back({marker, &retset[marker]});
+        }
+        retset[marker].flag = false;  // mark as on-flight or processed
+        ++marker;
       }
-#ifdef COLLECT_IO_STATS
-      global_io_stats.add_read(size_per_io, max_node_len);
+      
+      if (to_send.empty()) return 0;
+      
+      // 2. 批量加锁
+      std::vector<uint32_t> ids_to_lock;
+      ids_to_lock.reserve(to_send.size());
+      for (auto& [_, nbr] : to_send) {
+        ids_to_lock.push_back(nbr->id);
+      }
+#ifndef READ_ONLY_TESTS
+      for (auto& id : ids_to_lock) {
+        idx_lock_table.rdlock(id);
+      }
 #endif
-      return true;
+      
+      // 3. 发送所有I/O请求
+      for (auto& [_, nbr] : to_send) {
+        const unsigned loc = id2loc(nbr->id), pid = loc_sector_no(loc);
+        
+        uint64_t &cur_buf_idx = query_buf->sector_idx;
+        auto buf = sector_scratch + cur_buf_idx * size_per_io;
+        auto &req = query_buf->reqs[cur_buf_idx];
+        req = IORequest(static_cast<uint64_t>(pid) * SECTOR_LEN, size_per_io, buf, u_loc_offset(loc), max_node_len,
+                        sector_scratch);
+        reader->send_read_no_alloc(req, ctx);
+        
+        on_flight_ios.push(io_t{*nbr, pid, loc, &req});
+        cur_buf_idx = (cur_buf_idx + 1) % MAX_N_SECTOR_READS;
+        
+        if (stats != nullptr) {
+          stats->n_ios++;
+          stats->bytes_read += size_per_io;
+          stats->effective_bytes += max_node_len;
+        }
+#ifdef COLLECT_IO_STATS
+        global_io_stats.add_read(size_per_io, max_node_len);
+#endif
+      }
+      
+      return to_send.size();
     };
 
-    std::unordered_map<unsigned, char *> id_buf_map;
     auto poll_all = [&]() -> std::pair<int, int> {
       // poll once.
       reader->poll_all(ctx);
@@ -268,30 +274,17 @@ namespace pipeann {
         id_buf_map.insert(std::make_pair(io.nbr.id, offset_to_loc((char *) io.read_req->buf, io.loc)));
         io.nbr.distance <= retset[cur_list_size - 1].distance ? ++n_in : ++n_out;
         // unlock the corresponding page.
-        this->unlock_idx(idx_lock_table, io.nbr.id);
+#ifndef READ_ONLY_TESTS
+        idx_lock_table.unlock(io.nbr.id);
+#endif
         on_flight_ios.pop();
       }
       return std::make_pair(n_in, n_out);
     };
 
+    // 保留旧接口用于兼容
     auto send_best_read_req = [&](uint32_t n) -> bool {
-      // auto io_st = std::chrono::high_resolution_clock::now();
-      unsigned n_sent = 0, marker = 0;
-      while (marker < cur_list_size && n_sent < n) {
-        while (marker < cur_list_size /* pool size */ &&
-               (retset[marker].flag == false /* on flight */ ||
-                id_buf_map.find(retset[marker].id) != id_buf_map.end() /* already read */)) {
-          retset[marker].flag = false;  // even out the id_buf_map cost to O(1)
-          ++marker;
-        }
-        if (marker >= cur_list_size) {
-          break;  // nothing to send.
-        }
-        n_sent += send_read_req(retset[marker]);
-      }
-      // auto io_ed = std::chrono::high_resolution_clock::now();
-      // stats->io_us += std::chrono::duration_cast<std::chrono::microseconds>(io_ed - io_st).count();
-      return n_sent != 0;  // nothing to send.
+      return send_batch_read_req(n) != 0;
     };
 
     auto calc_best_node = [&]() -> int {  // if converged.
@@ -299,14 +292,15 @@ namespace pipeann {
       unsigned marker = 0, nk = cur_list_size, first_unvisited_eager = cur_list_size;
       /* calculate one from "already read" */
       for (marker = 0; marker < cur_list_size; ++marker) {
-        if (!retset[marker].visited && id_buf_map.find(retset[marker].id) != id_buf_map.end()) {
-          retset[marker].flag = false;  // even out the id_buf_map cost to O(1)
-          retset[marker].visited = true;
+        if (!retset[marker].visited) {
           auto it = id_buf_map.find(retset[marker].id);
-          auto [id, buf] = *it;
-          compute_exact_dists_and_push(buf, id);
-          compute_and_push_nbrs(buf, nk, id);  // 添加node id参数
-          break;
+          if (it != id_buf_map.end()) {
+            retset[marker].flag = false;
+            retset[marker].visited = true;
+            compute_exact_dists_and_push(it->second, it->first);
+            compute_and_push_nbrs(it->second, nk, it->first);
+            break;
+          }
         }
       }
 
@@ -365,36 +359,18 @@ namespace pipeann {
     }
 #endif
 
-    int cur_n_in = 0, cur_tot = 0;
     while (get_first_unvisited() != -1) {
       // poll to heap (best-effort) -> calc best from heap (skip if heap is empty) -> send IO (if can send) -> ...
       auto [n_in, n_out] = poll_all();
       std::ignore = n_in;
       std::ignore = n_out;
 
-      // DC-PDI优化: 使用更激进的beam_width调整策略
-      if (max_marker >= 3 && n_in + n_out > 0) {  // 降低触发阈值
-        cur_n_in += n_in;
-        cur_tot += n_in + n_out;
-        // 动态调整beam width
-        constexpr double kWasteThreshold = 0.15;  // 放宽阈值，允许更多预取
-        double waste_ratio = (cur_tot > 0) ? (cur_tot - cur_n_in) * 1.0 / cur_tot : 0;
-        if (waste_ratio <= kWasteThreshold) {
-          // 更快速地增加beam width
-          cur_beam_width = std::min((int64_t)beam_width, cur_beam_width + 2);
-        } else if (waste_ratio > 0.3 && cur_beam_width > 4) {
-          // 如果浪费过多，适当减少
-          cur_beam_width = std::max(4l, cur_beam_width - 1);
-        }
-      }
-
-      // DC-PDI优化: 一次发送更多请求以提高I/O并行度
+      // DC-PDI优化: 尽量保持I/O队列满载，一次发送所有可发送的请求
       if ((int64_t) on_flight_ios.size() < cur_beam_width) {
-        int to_send = std::min((int64_t)2, cur_beam_width - (int64_t)on_flight_ios.size());
+        int to_send = cur_beam_width - (int64_t)on_flight_ios.size();
         send_best_read_req(to_send);
       }
-      // auto io1_ed = std::chrono::high_resolution_clock::now();
-      // stats->io_us1 += std::chrono::duration_cast<std::chrono::microseconds>(io1_ed - io1_st).count();
+
       marker = calc_best_node();
       max_marker = std::max(max_marker, marker);
     }

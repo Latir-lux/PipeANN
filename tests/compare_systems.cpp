@@ -692,7 +692,7 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
     ofs << "system,time_sec,L,recall_at,recall_target,recall_pct,search_qps,p50_lat_us,p90_lat_us,p99_lat_us,"
-           "mean_ios,memory_rss_mb,reorg_running\n";
+           "mean_ios,memory_rss_mb,disk_usage_mb,reorg_running\n";
   }
 
   std::atomic<uint64_t> query_index(0);
@@ -822,12 +822,13 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
 
       double rss_kb, vm_kb;
       get_memory_usage(rss_kb, vm_kb);
+      double disk_mb = static_cast<double>(get_disk_usage_bytes(index._disk_index_prefix_in)) / (1024.0 * 1024.0);
 
       int reorg_running = index.is_reorganizing() ? 1 : 0;
       double elapsed_sec = timer.elapsed() / 1e6;
       ofs << system_names[system_type] << "," << elapsed_sec << "," << L << "," << recall_at << "," << target_recall
           << "," << recall_pct << "," << search_qps << "," << p50_lat << "," << p90_lat << "," << p99_lat << ","
-          << mean_ios << "," << (rss_kb / 1024.0) << "," << reorg_running << "\n";
+          << mean_ios << "," << (rss_kb / 1024.0) << "," << disk_mb << "," << reorg_running << "\n";
       ofs.flush();
 
       if (duration_sec > 0 && elapsed_sec >= duration_sec) {

@@ -215,31 +215,29 @@ namespace pipeann {
     // DC-PDI: 记录上一轮发送时的marker位置，用于模拟beam_search的num_seen限制
     unsigned last_send_marker = 0;
 
-    // DC-PDI优化: 重构为批量发送I/O请求，模仿beam_search的frontier选择策略
-    // 关键改进：添加num_seen计数器，限制每轮查看的节点数量
+    // DC-PDI优化: 重构为批量发送I/O请求
+    // 设计思路：从retset中按顺序扫描未访问节点，批量发送I/O请求
+    // 使用last_send_marker记录上次扫描位置，避免重复扫描
     auto send_batch_read_req = [&](uint32_t n, bool new_round) -> unsigned {
       if (n == 0) return 0;
       
-      // 如果是新一轮（处理完节点后），重置marker
+      // 如果是新一轮（k指针回退），重置marker从k开始
       unsigned marker = new_round ? k : last_send_marker;
       
-      // 1. 从marker开始收集需要发送的节点，模仿beam_search的num_seen策略
+      // 1. 从marker开始收集需要发送的节点
       std::vector<std::pair<unsigned, Neighbor*>> to_send;
       to_send.reserve(n);
-      uint32_t num_seen = 0;  // 关键：模仿beam_search的num_seen
       
-      while (marker < cur_list_size && to_send.size() < n && num_seen < beam_width) {
+      while (marker < cur_list_size && to_send.size() < n) {
         auto& node = retset[marker];
-        // 使用flag来标记节点是否已被考虑（类似beam_search）
-        if (node.flag && !node.visited) {
-          num_seen++;  // 每看一个有效候选就计数
+        // 只检查未访问的节点
+        if (!node.visited) {
           // 检查节点: 不在飞行中 + 未在id_buf_map中
           if (on_flight_set.find(node.id) == on_flight_set.end() 
               && id_buf_map.find(node.id) == id_buf_map.end()) {
             to_send.push_back({marker, &node});
             on_flight_set.insert(node.id);
           }
-          node.flag = false;  // 标记为已考虑（关键！）
         }
         ++marker;
       }
@@ -393,16 +391,23 @@ namespace pipeann {
         }
       }
       
-      // 4. 发送新的I/O请求
-      // 如果k回退了，开始新一轮；否则继续上一轮
+      // 4. 发送新的I/O请求（如果有空位）
+      unsigned sent = 0;
       if (on_flight_ios.size() < beam_width) {
-        send_batch_read_req(beam_width - on_flight_ios.size(), need_new_round);
+        sent = send_batch_read_req(beam_width - on_flight_ios.size(), need_new_round);
         need_new_round = false;
       }
       
-      // 5. 如果没有飞行中的I/O且无法发送新请求，检查是否收敛
-      if (on_flight_ios.empty() && is_converged()) {
-        break;
+      // 5. 检查是否收敛或需要重新扫描
+      if (on_flight_ios.empty()) {
+        if (is_converged()) {
+          break;  // 所有节点都已访问，搜索完成
+        }
+        // 还有未访问节点但没发送I/O，强制从k重新开始
+        if (sent == 0) {
+          need_new_round = true;
+          last_send_marker = k;
+        }
       }
     }
     

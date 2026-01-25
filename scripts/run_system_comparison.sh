@@ -75,7 +75,7 @@ case $DATASET in
     QUERY_FILE="${BASE_DIR}/gist/gist_query.bin"
     GT_FILE="${BASE_DIR}/gist/gist_gt.bin"
     INSERT_FILE="${BASE_DIR}/gist/gist_learn.bin"
-    INDEX_BASE="${BASE_DIR}/gist/gist"
+    INDEX_BASE="${BASE_DIR}/gist/indices/gist"
     ;;
   *)
     echo "Unknown dataset: $DATASET"

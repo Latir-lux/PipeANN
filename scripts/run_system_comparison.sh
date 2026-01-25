@@ -3,13 +3,17 @@
 # 运行DC-PDI、IP-DiskANN和FreshDiskANN的对比实验
 #
 # 使用方法:
-#   ./scripts/run_system_comparison.sh [experiment] [dataset] [base_dir] [output_dir] [exp2_base_ratio] [exp2_update_rate] [exp2_duration_sec] [exp3_base_ratio] [exp3_update_ratio] [exp3_duration_sec] [exp2_update_ratio]
+#   ./scripts/run_system_comparison.sh [experiment] [dataset] [base_dir] [output_dir] [exp1_base_ratio] [exp1_update_ratio] [exp1_duration_sec] [exp1_target_recall] [exp2_base_ratio] [exp2_update_rate] [exp2_duration_sec] [exp3_base_ratio] [exp3_update_ratio] [exp3_duration_sec] [exp2_update_ratio]
 #
 # 参数:
 #   experiment: 1/2/3/all (默认: all)
 #   dataset: sift/deep/gist (默认: sift)
 #   base_dir: 数据集和索引的基础目录 (默认: /mnt/xiaoxuanx/dataset)
 #   output_dir: 输出目录 (默认: /mnt/xiaoxuanx/dataset/exp/thesis_results/system_comparison)
+#   exp1_base_ratio: 实验1基础索引占比 (默认: 0.5)
+#   exp1_update_ratio: 实验1更新集占比(在剩余更新集中取比例, 默认: 0.5)
+#   exp1_duration_sec: 实验1持续时间(秒, 默认: 180)
+#   exp1_target_recall: 实验1目标召回率百分比(默认: 90)
 #   exp2_base_ratio: 实验2基础索引占比 (默认: 0.5)
 #   exp2_update_rate: 实验2更新速率(向量/秒, 0=不限制) (默认: 0)
 #   exp2_duration_sec: 实验2持续时间(秒, 0=全量更新) (默认: 0)
@@ -22,15 +26,19 @@ EXPERIMENT=${1:-"all"}
 DATASET=${2:-"sift"}
 BASE_DIR=${3:-"/mnt/xiaoxuanx/dataset"}
 OUTPUT_DIR=${4:-"/mnt/xiaoxuanx/dataset/exp/thesis_results/system_comparison"}
-EXP2_BASE_RATIO=${5:-"0.5"}
-EXP2_UPDATE_RATE=${6:-"0"}
-EXP2_DURATION_SEC=${7:-"0"}
-EXP3_BASE_RATIO=${8:-"0.5"}
-EXP3_UPDATE_RATIO=${9:-"0.5"}
-EXP3_DURATION_SEC=${10:-"120"}
-EXP2_UPDATE_RATIO=${11:-${EXP2_UPDATE_RATIO:-"1.0"}}
+EXP1_BASE_RATIO=${5:-${EXP1_BASE_RATIO:-"0.5"}}
+EXP1_UPDATE_RATIO=${6:-${EXP1_UPDATE_RATIO:-"0.5"}}
+EXP1_DURATION_SEC=${7:-${EXP1_DURATION_SEC:-"180"}}
+EXP1_TARGET_RECALL=${8:-${EXP1_TARGET_RECALL:-"90"}}
+EXP2_BASE_RATIO=${9:-"0.5"}
+EXP2_UPDATE_RATE=${10:-"0"}
+EXP2_DURATION_SEC=${11:-"0"}
+EXP3_BASE_RATIO=${12:-"0.5"}
+EXP3_UPDATE_RATIO=${13:-"0.5"}
+EXP3_DURATION_SEC=${14:-"120"}
+EXP2_UPDATE_RATIO=${15:-${EXP2_UPDATE_RATIO:-"1.0"}}
 NUM_THREADS=32
-RECALL_AT=99
+RECALL_AT=10
 
 TOTAL_MEM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || true)
 if [ -n "${TOTAL_MEM_KB}" ]; then
@@ -90,6 +98,10 @@ echo "GT file: $GT_FILE"
 echo "Index base: $INDEX_BASE"
 echo "Output directory: $RESULTS_DIR"
 echo "Experiment: $EXPERIMENT"
+echo "Exp1 base ratio: $EXP1_BASE_RATIO"
+echo "Exp1 update ratio: $EXP1_UPDATE_RATIO"
+echo "Exp1 duration sec: $EXP1_DURATION_SEC"
+echo "Exp1 target recall: $EXP1_TARGET_RECALL"
 echo "Exp2 base ratio: $EXP2_BASE_RATIO"
 echo "Exp2 update rate: $EXP2_UPDATE_RATE"
 echo "Exp2 duration sec: $EXP2_DURATION_SEC"
@@ -145,6 +157,7 @@ prepare_index() {
   local search_mode=$2
   local index_base=${3:-"${INDEX_BASE}"}
   local read_only=${4:-"false"}
+  local data_file=${5:-"${DATA_FILE}"}
   
   echo "[$(date)] Preparing index for $system_name..." >&2
   
@@ -152,7 +165,7 @@ prepare_index() {
   if [ ! -f "${index_base}_disk.index" ]; then
     echo "Building disk index..." >&2
     ensure_index_dir "${index_base}"
-    ./build/tests/build_disk_index ${DATA_TYPE} ${DATA_FILE} ${index_base} \
+    ./build/tests/build_disk_index ${DATA_TYPE} ${data_file} ${index_base} \
       96 128 32 ${BUILD_RAM_GB} ${NUM_THREADS} l2 pq >&2
     if [ ! -f "${index_base}_disk.index" ]; then
       echo "Error: Index build failed, missing ${index_base}_disk.index" >&2
@@ -195,15 +208,21 @@ run_search_latency_exp() {
   echo "实验1: 搜索延迟分布测试 - ${system_name}"
   echo "========================================"
   
-  local system_index=$(prepare_index ${system_name} ${system_type} "${INDEX_BASE}" true)
+  prepare_exp1_data ${DATA_FILE} ${DATA_TYPE} ${EXP1_BASE_RATIO} ${EXP1_UPDATE_RATIO}
+  local exp1_base_tag
+  exp1_base_tag=$(printf "%s" "${EXP1_BASE_RATIO}" | tr '.' 'p')
+  local exp1_index_base="${INDEX_BASE}_exp1_base${exp1_base_tag}"
+  local system_index=$(prepare_index ${system_name} ${system_type} "${exp1_index_base}" false "${EXP1_BASE_FILE}")
   local output_file="${RESULTS_DIR}/exp1_search_latency_${system_name}.csv"
 
   echo "[$(date)] Running search latency test for ${system_name}..."
   rm -f "${output_file}"
   ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
-    ${INSERT_FILE} ${system_type} 1 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES}
+    ${EXP1_UPDATE_FILE} ${system_type} 1 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES} \
+    --exp1-duration-sec ${EXP1_DURATION_SEC} --exp1-update-ratio 1.0 --exp1-target-recall ${EXP1_TARGET_RECALL}
   
   echo "[$(date)] Search latency test completed: ${output_file}"
+  cleanup_system_index ${system_index}
 }
 
 # 运行更新吞吐量实验
@@ -425,6 +444,96 @@ PY
 }
 
 
+# 准备实验1的数据分片（按比例拆分）
+prepare_exp1_data() {
+  local data_file=$1
+  local data_type=$2
+  local base_ratio=$3
+  local update_ratio=$4
+
+  local data_ext="${data_file##*.}"
+  local data_prefix="${data_file%.*}"
+
+  local base_pct
+  base_pct=$(python3 - <<PY
+import math
+print(int(round(${base_ratio} * 100)))
+PY
+)
+  local update_pct
+  update_pct=$(python3 - <<PY
+import math
+print(int(round(${update_ratio} * 100)))
+PY
+)
+
+  local base_file="${data_prefix}_exp1_base${base_pct}.${data_ext}"
+  local update_file="${data_prefix}_exp1_update${update_pct}.${data_ext}"
+
+  if [ -f "${base_file}" ] && [ -f "${update_file}" ]; then
+    echo "Using existing exp1 data splits: ${base_file}, ${update_file}" >&2
+    EXP1_BASE_FILE=${base_file}
+    EXP1_UPDATE_FILE=${update_file}
+    return
+  fi
+
+  python3 - <<PY
+import os
+import struct
+
+data_file = "${data_file}"
+base_file = "${base_file}"
+update_file = "${update_file}"
+base_ratio = float("${base_ratio}")
+update_ratio = float("${update_ratio}")
+data_type = "${data_type}"
+
+dtype_size = {"uint8": 1, "int8": 1, "float": 4}.get(data_type)
+if dtype_size is None:
+    raise SystemExit(f"Unsupported data type: {data_type}")
+
+with open(data_file, "rb") as f:
+    header = f.read(8)
+    if len(header) != 8:
+        raise SystemExit(f"Invalid data file header: {data_file}")
+    npts, dim = struct.unpack("<ii", header)
+
+base_pts = int(npts * base_ratio)
+remaining = max(0, npts - base_pts)
+update_pts = int(remaining * update_ratio)
+if update_pts > remaining:
+    update_pts = remaining
+
+if base_pts <= 0 or update_pts <= 0:
+    raise SystemExit(f"Invalid split sizes: base={base_pts}, update={update_pts}, total={npts}")
+
+def write_split(out_path, start_pt, count):
+    with open(data_file, "rb") as src, open(out_path, "wb") as dst:
+        dst.write(struct.pack("<ii", count, dim))
+        src.seek(8 + start_pt * dim * dtype_size)
+        remaining_bytes = count * dim * dtype_size
+        buf_size = 1024 * 1024
+        while remaining_bytes > 0:
+            to_read = min(buf_size, remaining_bytes)
+            chunk = src.read(to_read)
+            if not chunk:
+                raise SystemExit(f"Unexpected EOF while reading {data_file}")
+            dst.write(chunk)
+            remaining_bytes -= len(chunk)
+
+if not os.path.exists(base_file):
+    write_split(base_file, 0, base_pts)
+if not os.path.exists(update_file):
+    write_split(update_file, base_pts, update_pts)
+
+print(base_file)
+print(update_file)
+PY
+
+  EXP1_BASE_FILE=${base_file}
+  EXP1_UPDATE_FILE=${update_file}
+}
+
 # 准备实验3的数据分片（按比例拆分）
 prepare_exp3_data() {
   local data_file=$1
@@ -480,8 +589,8 @@ with open(data_file, "rb") as f:
     npts, dim = struct.unpack("<ii", header)
 
 base_pts = int(npts * base_ratio)
-update_pts = int(npts * update_ratio)
 remaining = max(0, npts - base_pts)
+update_pts = int(remaining * update_ratio)
 if update_pts > remaining:
     update_pts = remaining
 

@@ -98,13 +98,17 @@ reader.read((char*)data, n*d*sizeof(T));  // 向量数据
 ### 方式1: 自动化脚本（推荐）
 ```bash
 # 运行所有三系统对比实验
-./scripts/run_system_comparison.sh all sift /mnt/xiaoxuanx/dataset /mnt/xiaoxuanx/dataset/exp/thesis_results/system_comparison 0.5 0 0 0.5 0.5 120 1.0 1.0
+./scripts/run_system_comparison.sh all sift /mnt/xiaoxuanx/dataset /mnt/xiaoxuanx/dataset/exp/thesis_results/system_comparison 0.5 0.5 180 90 0.5 0 0 0.5 0.5 120 1.0
 
 # 参数说明:
 # - all: 实验类型(1/2/3/all)
 # - sift: 数据集名称(sift/deep/gist)
 # - /mnt/xiaoxuanx/dataset: 数据目录
 # - /mnt/xiaoxuanx/dataset/exp/thesis_results/system_comparison: 输出目录
+# - 0.5: exp1基础索引占比
+# - 0.5: exp1更新集占比(在剩余更新集中取比例)
+# - 180: exp1持续时间(秒)
+# - 90: exp1目标召回率百分比
 # - 0.5: exp2基础索引占比
 # - 0: exp2更新速率(0=不限制)
 # - 0: exp2持续时间(0=全量更新)
@@ -112,7 +116,6 @@ reader.read((char*)data, n*d*sizeof(T));  // 向量数据
 # - 0.5: exp3更新集占比(在剩余更新集中取比例)
 # - 120: exp3持续时间(秒)
 # - 1.0: exp2更新集占比(在剩余更新集中取比例)
-# - 1.0: exp1查询集占比
 ```
 
 ### 方式2: 单独运行

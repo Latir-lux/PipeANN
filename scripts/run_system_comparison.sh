@@ -753,16 +753,6 @@ if should_run "3"; then
   run_concurrent_exp 2 "fresh-diskann" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
 fi
 
-# ============= 生成对比图表 =============
-echo ""
-echo ">>> 生成对比图表 <<<"
-if [ -f "./draw/plot_system_comparison.py" ]; then
-  python3 ./draw/plot_system_comparison.py ${RESULTS_DIR}
-  echo "[$(date)] Plots generated in: ${RESULTS_DIR}/figures/"
-else
-  echo "Warning: plot_system_comparison.py not found, skipping visualization"
-fi
-
 # ============= 完成 =============
 echo ""
 echo "######################################"

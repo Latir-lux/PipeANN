@@ -428,29 +428,49 @@ def generate_summary_table(
 
         row: dict[str, object] = {"System": system_name}
 
-        # 从实验1获取搜索性能（95%召回率）
+        # 从实验1获取搜索性能（目标召回率）
         exp1_file = os.path.join(results_dir, f"exp1_search_latency_{system}.csv")
         if os.path.exists(exp1_file):
             df1 = pd.read_csv(exp1_file)
-            df1 = filter_outliers(
-                df1,
-                [
-                    "qps",
-                    "avg_lat_us",
-                    "p50_lat_us",
-                    "p90_lat_us",
-                    "p99_lat_us",
-                    "io_amplification",
-                ],
-            )
-            if df1.empty:
-                summary.append(row)
-                continue
-            target_recall = 0.95
-            closest_idx = (df1["recall"] - target_recall).abs().idxmin()
-            row["QPS@95%"] = int(df1.loc[closest_idx, "qps"])
-            row["P99(ms)@95%"] = f"{df1.loc[closest_idx, 'p99_lat_us'] / 1000:.2f}"
-            row["IO-Amp@95%"] = f"{df1.loc[closest_idx, 'io_amplification']:.2f}"
+            if "recall_pct" in df1.columns:
+                df1 = filter_outliers(
+                    df1,
+                    [
+                        "search_qps",
+                        "p50_lat_us",
+                        "p90_lat_us",
+                        "p99_lat_us",
+                        "mean_ios",
+                    ],
+                )
+                if df1.empty:
+                    summary.append(row)
+                    continue
+                target_recall = df1.get("recall_target", pd.Series([90.0])).iloc[0]
+                closest_idx = (df1["recall_pct"] - target_recall).abs().idxmin()
+                row["QPS@90%"] = int(df1.loc[closest_idx, "search_qps"])
+                row["P99(ms)@90%"] = f"{df1.loc[closest_idx, 'p99_lat_us'] / 1000:.2f}"
+                row["MeanIOs@90%"] = f"{df1.loc[closest_idx, 'mean_ios']:.2f}"
+            elif "recall" in df1.columns:
+                df1 = filter_outliers(
+                    df1,
+                    [
+                        "qps",
+                        "avg_lat_us",
+                        "p50_lat_us",
+                        "p90_lat_us",
+                        "p99_lat_us",
+                        "io_amplification",
+                    ],
+                )
+                if df1.empty:
+                    summary.append(row)
+                    continue
+                target_recall = 0.95
+                closest_idx = (df1["recall"] - target_recall).abs().idxmin()
+                row["QPS@95%"] = int(df1.loc[closest_idx, "qps"])
+                row["P99(ms)@95%"] = f"{df1.loc[closest_idx, 'p99_lat_us'] / 1000:.2f}"
+                row["IO-Amp@95%"] = f"{df1.loc[closest_idx, 'io_amplification']:.2f}"
 
         # 从实验2获取更新性能
         exp2_file = os.path.join(results_dir, f"exp2_update_throughput_{system}.csv")

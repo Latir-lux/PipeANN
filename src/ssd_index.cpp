@@ -175,11 +175,18 @@ namespace pipeann {
       bg_io_thread_[i] = new std::thread(&SSDIndex<T, TagT>::bg_io_thread, this);
     }
 #endif
+
+#ifdef ENABLE_DISPERSION_MONITOR
+    start_reorg_thread();
+#endif
   }
 
   // 回收所有分配的scratch buffer
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::destroy_buffers() {
+#ifdef ENABLE_DISPERSION_MONITOR
+    stop_reorg_thread();
+#endif
 #ifndef READ_ONLY_TESTS
     for (int i = 0; i < kBgIOThreads; ++i) {
       if (bg_io_thread_[i] != nullptr) {
@@ -209,6 +216,49 @@ namespace pipeann {
       delete buf;
     }
   }
+
+#ifdef ENABLE_DISPERSION_MONITOR
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::start_reorg_thread() {
+    if (reorg_thread_.joinable()) {
+      return;
+    }
+    reorg_stop_.store(false);
+    reorg_thread_ = std::thread(&SSDIndex<T, TagT>::reorg_worker, this);
+  }
+
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::stop_reorg_thread() {
+    reorg_stop_.store(true);
+    if (reorg_thread_.joinable()) {
+      reorg_thread_.join();
+    }
+  }
+
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::reorg_worker() {
+    while (!reorg_stop_.load()) {
+      if (dispersion_monitor_.should_reorganize()) {
+        perform_reorganization();
+      }
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+  }
+
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::perform_reorganization() {
+    std::unique_lock<std::shared_mutex> lock(merge_lock);
+    reorg_running_.store(true);
+
+    auto fragmented_pages = dispersion_monitor_.get_fragmented_pages();
+    for (auto page_id : fragmented_pages) {
+      dispersion_monitor_.clear_page(page_id);
+    }
+    dispersion_monitor_.reset();
+
+    reorg_running_.store(false);
+  }
+#endif
 
   template<typename T, typename TagT>
   int SSDIndex<T, TagT>::load(const char *index_prefix, uint32_t num_threads, bool new_index_format,

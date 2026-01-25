@@ -102,6 +102,16 @@ namespace pipeann {
   }
 
   template<typename T, typename TagT>
+  bool DynamicSSDIndex<T, TagT>::is_reorganizing() const {
+#ifdef ENABLE_DISPERSION_MONITOR
+    if (_disk_index != nullptr) {
+      return _disk_index->is_reorganizing();
+    }
+#endif
+    return false;
+  }
+
+  template<typename T, typename TagT>
   void DynamicSSDIndex<T, TagT>::checkpoint() {
     // TODO(gh): checkpoint the index.
     journal->checkpoint();

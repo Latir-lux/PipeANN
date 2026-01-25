@@ -28,6 +28,7 @@
 namespace pipeann {
   template<typename T, typename TagT>
   int SSDIndex<T, TagT>::insert_in_place(const T *point1, const TagT &tag, tsl::robin_set<uint32_t> *deletion_set) {
+    std::shared_lock lk(merge_lock);
     if (unlikely(size_per_io != SECTOR_LEN)) {
       LOG(ERROR) << "Insert not supported for size_per_io == " << size_per_io;
     }
@@ -52,7 +53,7 @@ namespace pipeann {
     this->do_beam_search(point1, 0, l_index, beam_width, exp_node_info, &coord_map, coord_buf, nullptr, deletion_set,
                          false, &page_ref);
     std::vector<uint32_t> new_nhood;
-    
+
     // DC-PDI: 使用块感知剪枝（论文4.2节）
     // 确定目标页面（使用连接强度最高的页面）
 #ifdef ENABLE_BLOCK_AWARE_PRUNE
@@ -61,13 +62,13 @@ namespace pipeann {
       // 计算各页面的连接强度并选择最优页面
       std::unordered_map<uint64_t, float> page_strength;
       constexpr float kDistanceDecay = 1.5f;
-      for (auto& nbr : exp_node_info) {
+      for (auto &nbr : exp_node_info) {
         uint64_t page = node_sector_no(nbr.id);
         float dist = std::max(nbr.distance, 1e-6f);
         page_strength[page] += 1.0f / std::pow(dist, kDistanceDecay);
       }
       float max_strength = 0;
-      for (auto& [page, strength] : page_strength) {
+      for (auto &[page, strength] : page_strength) {
         if (strength > max_strength) {
           max_strength = strength;
           target_page = page;
@@ -104,10 +105,10 @@ namespace pipeann {
     // 根据邻居的距离计算连接强度，选择最优页面
     std::vector<float> neighbor_dists;
     neighbor_dists.reserve(new_nhood.size());
-    for (auto& nbr_id : new_nhood) {
+    for (auto &nbr_id : new_nhood) {
       // 从exp_node_info中找到对应邻居的距离
       float dist = std::numeric_limits<float>::max();
-      for (auto& info : exp_node_info) {
+      for (auto &info : exp_node_info) {
         if (info.id == nbr_id) {
           dist = info.distance;
           break;
@@ -190,7 +191,8 @@ namespace pipeann {
     for (uint32_t i = 0; i < new_nhood.size(); ++i) {
       auto r_sector = node_sector_no(new_nhood[i]);
       if (page_buf_map.find(r_sector) == page_buf_map.end()) {
-        LOG(ERROR) << new_nhood[i] << " " << "Sector " << r_sector << " not found in page_buf_map";
+        LOG(ERROR) << new_nhood[i] << " "
+                   << "Sector " << r_sector << " not found in page_buf_map";
         exit(-1);
       }
       auto r_node_buf = offset_to_node(page_buf_map[r_sector], new_nhood[i]);

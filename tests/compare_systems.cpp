@@ -351,7 +351,8 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
 
   // 输出文件
   std::ofstream ofs(output_file);
-  ofs << "system,L,recall,qps,avg_lat_us,p50_lat_us,p90_lat_us,p95_lat_us,p99_lat_us,mean_ios,io_amplification\n";
+  ofs << "system,L,recall,qps,avg_lat_us,p50_lat_us,p90_lat_us,p95_lat_us,p99_lat_us,mean_ios,io_amplification,reorg_"
+         "running\n";
 
   // 测试不同L值
   for (auto L : L_values) {
@@ -406,8 +407,13 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
     double io_amplification = mean_ios / recall_at;
 
     // 输出结果
+    int reorg_running = 0;
+#ifdef ENABLE_DISPERSION_MONITOR
+    reorg_running = index.is_reorganizing() ? 1 : 0;
+#endif
     ofs << system_names[system_type] << "," << L << "," << recall << "," << qps << "," << avg_lat << "," << p50 << ","
-        << p90 << "," << p95 << "," << p99 << "," << mean_ios << "," << io_amplification << "\n";
+        << p90 << "," << p95 << "," << p99 << "," << mean_ios << "," << io_amplification << "," << reorg_running
+        << "\n";
 
     std::cout << system_names[system_type] << " L=" << L << ": Recall=" << recall << ", QPS=" << qps << ", P99=" << p99
               << "us, MeanIOs=" << mean_ios << std::endl;
@@ -433,7 +439,7 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
                                const std::string &output_file) {
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
-    ofs << "system,time_sec,num_inserts,throughput_ops,memory_rss_mb,disk_usage_mb,merge_triggered\n";
+    ofs << "system,time_sec,num_inserts,throughput_ops,memory_rss_mb,disk_usage_mb,merge_triggered,reorg_running\n";
   }
 
   std::atomic<uint64_t> insert_count(0);
@@ -482,8 +488,9 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
       get_memory_usage(rss_kb, vm_kb);
       double disk_mb = static_cast<double>(get_disk_usage_bytes(index._disk_index_prefix_in)) / (1024.0 * 1024.0);
 
+      int reorg_running = index.is_reorganizing() ? 1 : 0;
       ofs << system_names[system_type] << "," << elapsed_sec << "," << current_inserts << "," << throughput << ","
-          << (rss_kb / 1024.0) << "," << disk_mb << "," << (merge_done.load() ? 1 : 0) << "\n";
+          << (rss_kb / 1024.0) << "," << disk_mb << "," << (merge_done.load() ? 1 : 0) << "," << reorg_running << "\n";
       ofs.flush();
 
       if (current_inserts >= num_inserts) {
@@ -520,7 +527,8 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
                                     SystemType system_type, const std::string &output_file) {
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
-    ofs << "system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb,disk_usage_mb\n";
+    ofs << "system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb,disk_usage_mb,reorg_"
+           "running\n";
   }
 
   std::atomic<uint64_t> search_count(0);
@@ -638,8 +646,9 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
       get_memory_usage(rss_kb, vm_kb);
       double disk_mb = static_cast<double>(get_disk_usage_bytes(index._disk_index_prefix_in)) / (1024.0 * 1024.0);
 
+      int reorg_running = index.is_reorganizing() ? 1 : 0;
       ofs << system_names[system_type] << "," << elapsed_sec << "," << search_qps << "," << p99_lat << "," << inserts
-          << "," << insert_tput << "," << (rss_kb / 1024.0) << "," << disk_mb << "\n";
+          << "," << insert_tput << "," << (rss_kb / 1024.0) << "," << disk_mb << "," << reorg_running << "\n";
       ofs.flush();
 
       if ((duration_sec > 0 && elapsed_sec >= duration_sec) || inserts >= insert_num) {

@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <string>
 #include <set>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include "nbr/abstract_nbr.h"
 #include <omp.h>
 
@@ -241,14 +244,10 @@ namespace pipeann {
 
     // DC-PDI: 块感知邻居剪枝（论文4.2节）
     // 对跨页边应用惩罚系数，优先保留页内边
-    void prune_neighbors_block_aware(const tsl::robin_map<uint32_t, T *> &coord_map,
-                                     std::vector<Neighbor> &pool,
-                                     std::vector<uint32_t> &pruned_list,
-                                     uint64_t target_page);
-    void prune_neighbors_pq_block_aware(std::vector<Neighbor> &pool,
-                                        std::vector<uint32_t> &pruned_list,
-                                        uint8_t *scratch,
-                                        uint64_t target_page);
+    void prune_neighbors_block_aware(const tsl::robin_map<uint32_t, T *> &coord_map, std::vector<Neighbor> &pool,
+                                     std::vector<uint32_t> &pruned_list, uint64_t target_page);
+    void prune_neighbors_pq_block_aware(std::vector<Neighbor> &pool, std::vector<uint32_t> &pruned_list,
+                                        uint8_t *scratch, uint64_t target_page);
 
     // delta pruning.
     struct TriangleNeighbor {
@@ -630,67 +629,66 @@ namespace pipeann {
 
     /**
      * DC-PDI: 基于聚类感知的位置分配（论文3.2节）
-     * 
+     *
      * 根据拓扑连接强度选择最优页面，将新节点放置在与其邻居连接最紧密的页面中
      * S(u, P_j) = Σ (1/dist(u,v)^α) * ω_nav, for v ∈ V(P_j) ∩ N(u)
-     * 
+     *
      * @param n 需要分配的位置数
      * @param new_neighbors 新节点的邻居ID列表
      * @param neighbor_dists 新节点到各邻居的距离
      * @param page_need_to_read 需要读取的页面集合（输出参数）
      * @return 分配的位置列表
      */
-    std::vector<uint64_t> alloc_loc_clustering_aware(
-        int n,
-        const std::vector<uint32_t>& new_neighbors,
-        const std::vector<float>& neighbor_dists,
-        std::set<uint64_t>& page_need_to_read) {
-      
+    std::vector<uint64_t> alloc_loc_clustering_aware(int n, const std::vector<uint32_t> &new_neighbors,
+                                                     const std::vector<float> &neighbor_dists,
+                                                     std::set<uint64_t> &page_need_to_read) {
       std::lock_guard<std::mutex> lock(alloc_lock);
       std::vector<uint64_t> ret;
       int cur = 0;
       uint32_t threshold = (nnodes_per_sector + kIndexSizeFactor - 1) / kIndexSizeFactor;
-      
+
       // 1. 计算各候选页面的连接强度
       std::unordered_map<uint64_t, float> page_strength;
       constexpr float kDistanceDecay = 1.5f;
-      
+
       for (size_t i = 0; i < new_neighbors.size() && i < neighbor_dists.size(); i++) {
         uint64_t page = node_sector_no(new_neighbors[i]);
         float dist = std::max(neighbor_dists[i], 1e-6f);
         page_strength[page] += 1.0f / std::pow(dist, kDistanceDecay);
       }
-      
+
       // 2. 按连接强度排序
-      std::vector<std::pair<uint64_t, float>> sorted_pages(
-          page_strength.begin(), page_strength.end());
+      std::vector<std::pair<uint64_t, float>> sorted_pages(page_strength.begin(), page_strength.end());
       std::sort(sorted_pages.begin(), sorted_pages.end(),
-          [](const auto& a, const auto& b) { return a.second > b.second; });
-      
+                [](const auto &a, const auto &b) { return a.second > b.second; });
+
       // 3. 优先使用高连接强度页面的空槽
-      for (auto& [page, strength] : sorted_pages) {
-        if (cur >= n) break;
-        
+      for (auto &[page, strength] : sorted_pages) {
+        if (cur >= n)
+          break;
+
 #ifdef NO_POLLUTE_ORIGINAL
         if (page < loc_sector_no(init_num_pts)) {
           continue;
         }
 #endif
-        
+
         auto st = sector_to_loc(page, 0);
         auto ed = nnodes_per_sector == 0 ? st + 1 : st + nnodes_per_sector;
-        
+
         uint32_t empty_count = 0;
         for (uint32_t i = st; i < ed; i++) {
-          if (loc2id_[i] == kInvalidID) empty_count++;
+          if (loc2id_[i] == kInvalidID)
+            empty_count++;
         }
-        
-        if (empty_count < threshold) continue;  // 空槽不足
-        
+
+        if (empty_count < threshold)
+          continue;  // 空槽不足
+
         if (empty_count < nnodes_per_sector) {
           page_need_to_read.insert(page);
         }
-        
+
         for (uint32_t i = st; i < ed && cur < n; i++) {
           if (loc2id_[i] == kInvalidID) {
             loc2id_[i] = kAllocatedID;
@@ -699,7 +697,7 @@ namespace pipeann {
           }
         }
       }
-      
+
       // 4. 使用空页面回退
       if (cur < n) {
         uint32_t empty_page;
@@ -720,19 +718,19 @@ namespace pipeann {
           }
         }
       }
-      
+
       // 5. 分配新页面
       int remaining = n - cur;
       for (int i = 0; i < remaining; i++) {
         set_loc2id(cur_loc + i, kAllocatedID);
         ret.push_back(cur_loc + i);
       }
-      
+
       cur_loc += remaining;
       while (nnodes_per_sector != 0 && cur_loc % nnodes_per_sector != 0) {
         set_loc2id(cur_loc++, kInvalidID);
       }
-      
+
       return ret;
     }
 
@@ -802,9 +800,29 @@ namespace pipeann {
 #ifdef ENABLE_DISPERSION_MONITOR
     // DC-PDI: 物理离散度监控器（论文3.3节）
     DispersionMonitor dispersion_monitor_;
-    
-    DispersionMonitor& get_dispersion_monitor() { return dispersion_monitor_; }
-    const DispersionMonitor& get_dispersion_monitor() const { return dispersion_monitor_; }
+
+    DispersionMonitor &get_dispersion_monitor() {
+      return dispersion_monitor_;
+    }
+    const DispersionMonitor &get_dispersion_monitor() const {
+      return dispersion_monitor_;
+    }
+
+    bool is_reorganizing() const {
+      return reorg_running_.load();
+    }
+#endif
+
+   private:
+#ifdef ENABLE_DISPERSION_MONITOR
+    std::atomic<bool> reorg_running_{false};
+    std::atomic<bool> reorg_stop_{false};
+    std::thread reorg_thread_;
+
+    void start_reorg_thread();
+    void stop_reorg_thread();
+    void reorg_worker();
+    void perform_reorganization();
 #endif
   };
 }  // namespace pipeann

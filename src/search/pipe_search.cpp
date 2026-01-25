@@ -99,12 +99,12 @@ namespace pipeann {
       unsigned *node_nbrs = offset_to_node_nhood(node_buf);
       unsigned nnbrs = *(node_nbrs++);
       unsigned nbors_cand_size = 0;
-      
+
       // DC-PDI: 统计物理离散度
       if (stats != nullptr && nnbrs > 0) {
         unsigned cross_page_neighbors = 0;
         unsigned current_page = loc_sector_no(id2loc(current_node_id));
-        
+
         for (unsigned m = 0; m < nnbrs; ++m) {
           unsigned nbr_id = node_nbrs[m];
           unsigned nbr_page = loc_sector_no(id2loc(nbr_id));
@@ -112,15 +112,25 @@ namespace pipeann {
             cross_page_neighbors++;
           }
         }
-        
+
         // 累积物理离散度统计
         stats->physical_dispersion += cross_page_neighbors;
         stats->sampled_nodes++;
         if (nnbrs > 0) {
-          stats->page_local_edge_ratio += (double)(nnbrs - cross_page_neighbors) / nnbrs;
+          stats->page_local_edge_ratio += (double) (nnbrs - cross_page_neighbors) / nnbrs;
         }
+
+#ifdef ENABLE_DISPERSION_MONITOR
+        static thread_local uint32_t dispersion_sample_counter = 0;
+        if (dispersion_monitor_.is_enabled()) {
+          dispersion_sample_counter++;
+          if (dispersion_sample_counter % DispersionMonitor::kSampleRate == 0) {
+            dispersion_monitor_.update_dispersion(current_page, cross_page_neighbors);
+          }
+        }
+#endif
       }
-      
+
       for (unsigned m = 0; m < nnbrs; ++m) {
         if (visited.find(node_nbrs[m]) == visited.end()) {
           node_nbrs[nbors_cand_size++] = node_nbrs[m];
@@ -156,7 +166,8 @@ namespace pipeann {
         }
         auto compute_ed = std::chrono::high_resolution_clock::now();
         if (stats != nullptr) {
-          stats->compute_phase_us += std::chrono::duration_cast<std::chrono::microseconds>(compute_ed - compute_st).count();
+          stats->compute_phase_us +=
+              std::chrono::duration_cast<std::chrono::microseconds>(compute_ed - compute_st).count();
         }
       }
     };
@@ -235,10 +246,11 @@ namespace pipeann {
 
       if (stats != nullptr) {
         stats->n_ios++;
-        stats->bytes_read += size_per_io;  // 记录实际读取字节数
+        stats->bytes_read += size_per_io;        // 记录实际读取字节数
         stats->effective_bytes += max_node_len;  // 记录有效数据字节数
         auto prefetch_end = std::chrono::high_resolution_clock::now();
-        stats->prefetch_phase_us += std::chrono::duration_cast<std::chrono::microseconds>(prefetch_end - prefetch_start).count();
+        stats->prefetch_phase_us +=
+            std::chrono::duration_cast<std::chrono::microseconds>(prefetch_end - prefetch_start).count();
       }
 #ifdef COLLECT_IO_STATS
       global_io_stats.add_read(size_per_io, max_node_len);

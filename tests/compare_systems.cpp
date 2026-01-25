@@ -309,8 +309,11 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
     delete[] gt_dists;
     return;
   }
-  if (gt_dim < recall_at) {
-    std::cerr << "Error: Groundtruth k (" << gt_dim << ") is smaller than recall@" << recall_at << "." << std::endl;
+  int recall_min = 10;
+  int recall_max = std::min(99, static_cast<int>(gt_dim));
+  recall_max = std::min(recall_max, static_cast<int>(recall_at));
+  if (recall_max < recall_min) {
+    std::cerr << "Error: Groundtruth k (" << gt_dim << ") is smaller than recall@" << recall_min << "." << std::endl;
     delete[] query;
     delete[] gt_ids;
     delete[] gt_dists;
@@ -358,8 +361,8 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
 
   // 测试不同L值
   for (auto L : L_values) {
-    TagT *query_result_tags = new TagT[recall_at * query_num];
-    float *query_result_dists = new float[recall_at * query_num];
+    TagT *query_result_tags = new TagT[recall_max * query_num];
+    float *query_result_dists = new float[recall_max * query_num];
     pipeann::QueryStats *stats = new pipeann::QueryStats[query_num];
     std::vector<double> latency_stats(query_num, 0);
 
@@ -370,11 +373,11 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
       auto qs = std::chrono::high_resolution_clock::now();
 
       if (search_mode == PIPE_SEARCH) {
-        index.pipe_search(query + (i * query_dim), recall_at, 0, L, query_result_tags + (i * recall_at),
-                          query_result_dists + (i * recall_at), beam_width, stats + i);
+        index.pipe_search(query + (i * query_dim), recall_max, 0, L, query_result_tags + (i * recall_max),
+                          query_result_dists + (i * recall_max), beam_width, stats + i);
       } else {
-        index.beam_search(query + (i * query_dim), recall_at, 0, L, query_result_tags + (i * recall_at),
-                          query_result_dists + (i * recall_at), beam_width, stats + i);
+        index.beam_search(query + (i * query_dim), recall_max, 0, L, query_result_tags + (i * recall_max),
+                          query_result_dists + (i * recall_max), beam_width, stats + i);
       }
 
       auto qe = std::chrono::high_resolution_clock::now();
@@ -394,10 +397,6 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
     double p95 = latency_stats[query_num * 0.95];
     double p99 = latency_stats[query_num * 0.99];
 
-    // 计算召回率
-    double recall = pipeann::calculate_recall((uint32_t) query_num, gt_ids, gt_dists, (uint32_t) gt_dim,
-                                              query_result_tags, (uint32_t) recall_at, (uint32_t) recall_at);
-
     // 计算平均IO次数
     double mean_ios = 0.0;
     for (size_t i = 0; i < query_num; i++) {
@@ -405,20 +404,22 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
     }
     mean_ios /= query_num;
 
-    // IO放大率 = 实际IO次数 / 理论最少IO次数
-    double io_amplification = mean_ios / recall_at;
-
-    // 输出结果
     int reorg_running = 0;
 #ifdef ENABLE_DISPERSION_MONITOR
     reorg_running = index.is_reorganizing() ? 1 : 0;
 #endif
-    ofs << system_names[system_type] << "," << recall_at << "," << L << "," << recall << "," << qps << "," << avg_lat
-        << "," << p50 << "," << p90 << "," << p95 << "," << p99 << "," << mean_ios << "," << io_amplification << ","
-        << reorg_running << "\n";
+    for (int recall_k = recall_min; recall_k <= recall_max; ++recall_k) {
+      double recall = pipeann::calculate_recall((uint32_t) query_num, gt_ids, gt_dists, (uint32_t) gt_dim,
+                                                query_result_tags, (uint32_t) recall_max, (uint32_t) recall_k);
+      double io_amplification = mean_ios / recall_k;
 
-    std::cout << system_names[system_type] << " L=" << L << ": Recall=" << recall << ", QPS=" << qps << ", P99=" << p99
-              << "us, MeanIOs=" << mean_ios << std::endl;
+      ofs << system_names[system_type] << "," << recall_k << "," << L << "," << recall << "," << qps << "," << avg_lat
+          << "," << p50 << "," << p90 << "," << p95 << "," << p99 << "," << mean_ios << "," << io_amplification << ","
+          << reorg_running << "\n";
+
+      std::cout << system_names[system_type] << " L=" << L << ": Recall@" << recall_k << "=" << recall
+                << ", QPS=" << qps << ", P99=" << p99 << "us, MeanIOs=" << mean_ios << std::endl;
+    }
 
     delete[] query_result_tags;
     delete[] query_result_dists;

@@ -30,8 +30,7 @@ EXP3_UPDATE_RATIO=${9:-"0.5"}
 EXP3_DURATION_SEC=${10:-"120"}
 EXP2_UPDATE_RATIO=${11:-${EXP2_UPDATE_RATIO:-"1.0"}}
 NUM_THREADS=32
-RECALL_AT=10
-RECALL_AT_VALUES=$(seq 10 99)
+RECALL_AT=99
 
 TOTAL_MEM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || true)
 if [ -n "${TOTAL_MEM_KB}" ]; then
@@ -201,10 +200,8 @@ run_search_latency_exp() {
 
   echo "[$(date)] Running search latency test for ${system_name}..."
   rm -f "${output_file}"
-  for recall_at in ${RECALL_AT_VALUES}; do
-    ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
-      ${INSERT_FILE} ${system_type} 1 ${RESULTS_DIR} ${NUM_THREADS} ${recall_at} ${L_VALUES}
-  done
+  ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
+    ${INSERT_FILE} ${system_type} 1 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES}
   
   echo "[$(date)] Search latency test completed: ${output_file}"
 }

@@ -34,6 +34,16 @@ EXP1_QUERY_RATIO=${12:-${EXP1_QUERY_RATIO:-"1.0"}}
 NUM_THREADS=32
 RECALL_AT=10
 
+TOTAL_MEM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || true)
+if [ -n "${TOTAL_MEM_KB}" ]; then
+  BUILD_RAM_GB=$(awk -v kb="${TOTAL_MEM_KB}" 'BEGIN { printf "%d", kb / 1024 / 1024 / 2 }')
+else
+  BUILD_RAM_GB=128
+fi
+if [ "${BUILD_RAM_GB}" -lt 1 ]; then
+  BUILD_RAM_GB=1
+fi
+
 # 为不同数据集隔离输出目录，避免覆盖
 RESULTS_DIR="${OUTPUT_DIR}/${DATASET}"
 mkdir -p ${RESULTS_DIR}
@@ -87,6 +97,7 @@ echo "Exp2 update rate: $EXP2_UPDATE_RATE"
 echo "Exp2 duration sec: $EXP2_DURATION_SEC"
 echo "Exp2 update ratio: $EXP2_UPDATE_RATIO"
 echo "Exp1 query ratio: $EXP1_QUERY_RATIO"
+echo "Build RAM budget (GB): ${BUILD_RAM_GB}"
 echo "Exp3 base ratio: $EXP3_BASE_RATIO"
 echo "Exp3 update ratio: $EXP3_UPDATE_RATIO"
 echo "Exp3 duration sec: $EXP3_DURATION_SEC"
@@ -145,7 +156,11 @@ prepare_index() {
     echo "Building disk index..." >&2
     ensure_index_dir "${index_base}"
     ./build/tests/build_disk_index ${DATA_TYPE} ${DATA_FILE} ${index_base} \
-      96 128 32 256 ${NUM_THREADS} l2 pq >&2
+      96 128 32 ${BUILD_RAM_GB} ${NUM_THREADS} l2 pq >&2
+    if [ ! -f "${index_base}_disk.index" ]; then
+      echo "Error: Index build failed, missing ${index_base}_disk.index" >&2
+      exit 1
+    fi
   fi
   
   if [ "${read_only}" = "true" ]; then
@@ -717,7 +732,11 @@ if should_run "2"; then
     echo "Building exp2 base index..." >&2
     ensure_index_dir "${EXP2_INDEX_BASE}"
     ./build/tests/build_disk_index ${DATA_TYPE} ${EXP2_BASE_FILE} ${EXP2_INDEX_BASE} \
-      96 128 32 256 ${NUM_THREADS} l2 pq >&2
+      96 128 32 ${BUILD_RAM_GB} ${NUM_THREADS} l2 pq >&2
+    if [ ! -f "${EXP2_INDEX_BASE}_disk.index" ]; then
+      echo "Error: Exp2 index build failed, missing ${EXP2_INDEX_BASE}_disk.index" >&2
+      exit 1
+    fi
   fi
 
   run_update_throughput_exp 0 "dc-pdi" ${EXP2_UPDATE_FILE} ${EXP2_INDEX_BASE}
@@ -738,7 +757,11 @@ if should_run "3"; then
     echo "Building exp3 base index..." >&2
     ensure_index_dir "${EXP3_INDEX_BASE}"
     ./build/tests/build_disk_index ${DATA_TYPE} ${EXP3_BASE_FILE} ${EXP3_INDEX_BASE} \
-      96 128 32 256 ${NUM_THREADS} l2 pq >&2
+      96 128 32 ${BUILD_RAM_GB} ${NUM_THREADS} l2 pq >&2
+    if [ ! -f "${EXP3_INDEX_BASE}_disk.index" ]; then
+      echo "Error: Exp3 index build failed, missing ${EXP3_INDEX_BASE}_disk.index" >&2
+      exit 1
+    fi
   fi
 
   run_concurrent_exp 0 "dc-pdi" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}

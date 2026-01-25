@@ -98,12 +98,21 @@ reader.read((char*)data, n*d*sizeof(T));  // 向量数据
 ### 方式1: 自动化脚本（推荐）
 ```bash
 # 运行所有三系统对比实验
-./scripts/run_system_comparison.sh sift /mnt/nvme/data ./results/comparison
+./scripts/run_system_comparison.sh all sift /mnt/xiaoxuanx/dataset /mnt/xiaoxuanx/dataset/exp/thesis_results/system_comparison 0.5 0 0 0.5 0.5 120 1.0 1.0
 
 # 参数说明:
-# - sift: 数据集名称
-# - /mnt/nvme/data: 数据目录
-# - ./results/comparison: 输出目录
+# - all: 实验类型(1/2/3/all)
+# - sift: 数据集名称(sift/deep/gist)
+# - /mnt/xiaoxuanx/dataset: 数据目录
+# - /mnt/xiaoxuanx/dataset/exp/thesis_results/system_comparison: 输出目录
+# - 0.5: exp2基础索引占比
+# - 0: exp2更新速率(0=不限制)
+# - 0: exp2持续时间(0=全量更新)
+# - 0.5: exp3基础索引占比
+# - 0.5: exp3更新集占比(在剩余更新集中取比例)
+# - 120: exp3持续时间(秒)
+# - 1.0: exp2更新集占比(在剩余更新集中取比例)
+# - 1.0: exp1查询集占比
 ```
 
 ### 方式2: 单独运行
@@ -125,7 +134,7 @@ reader.read((char*)data, n*d*sizeof(T));  // 向量数据
 
 ### 输出文件
 ```
-results/comparison/
+results/comparison/sift/
 ├── exp1_search_latency_dc-pdi.csv          # DC-PDI搜索性能
 ├── exp1_search_latency_ip-diskann.csv      # IP-DiskANN搜索性能
 ├── exp1_search_latency_fresh-diskann.csv   # FreshDiskANN搜索性能
@@ -147,14 +156,14 @@ DC-PDI,200,0.95,5200,192,180,230,250,280,12.5,1.25
 
 **exp2 (更新吞吐量)**
 ```csv
-system,time_sec,num_inserts,throughput_ops,memory_rss_mb,merge_triggered
-DC-PDI,1.0,1500,1500,2048,0
+system,time_sec,num_inserts,throughput_ops,memory_rss_mb,disk_usage_mb,merge_triggered
+DC-PDI,1.0,1500,1500,2048,102400,0
 ```
 
 **exp3 (并发性能)**
 ```csv
-system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb
-DC-PDI,1.0,4500,250,1200,1200,2048
+system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb,disk_usage_mb
+DC-PDI,1.0,4500,250,1200,1200,2048,102400
 ```
 
 ## 六、可视化
@@ -165,10 +174,10 @@ DC-PDI,1.0,4500,250,1200,1200,2048
 python3 draw/plot_system_comparison.py ./results/comparison
 
 # 输出:
-# - figures/fig_search_latency_comparison.pdf
-# - figures/fig_update_throughput_comparison.pdf  
-# - figures/fig_concurrent_performance_comparison.pdf
-# - system_comparison_summary.csv
+# - figures/fig_search_latency_comparison_<dataset>.pdf
+# - figures/fig_update_throughput_comparison_<dataset>.pdf  
+# - figures/fig_concurrent_performance_comparison_<dataset>.pdf
+# - system_comparison_summary_<dataset>.csv
 ```
 
 ### 使用plot_thesis_figures.py（原有）

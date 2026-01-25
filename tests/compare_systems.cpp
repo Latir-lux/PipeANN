@@ -350,9 +350,11 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
   std::cout << "Loaded index for " << system_names[system_type] << ", num_points=" << index.num_points << std::endl;
 
   // 输出文件
-  std::ofstream ofs(output_file);
-  ofs << "system,L,recall,qps,avg_lat_us,p50_lat_us,p90_lat_us,p95_lat_us,p99_lat_us,mean_ios,io_amplification,reorg_"
-         "running\n";
+  std::ofstream ofs(output_file, std::ios::app);
+  if (ofs.tellp() == 0) {
+    ofs << "system,recall_at,L,recall,qps,avg_lat_us,p50_lat_us,p90_lat_us,p95_lat_us,p99_lat_us,mean_ios,"
+           "io_amplification,reorg_running\n";
+  }
 
   // 测试不同L值
   for (auto L : L_values) {
@@ -411,9 +413,9 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
 #ifdef ENABLE_DISPERSION_MONITOR
     reorg_running = index.is_reorganizing() ? 1 : 0;
 #endif
-    ofs << system_names[system_type] << "," << L << "," << recall << "," << qps << "," << avg_lat << "," << p50 << ","
-        << p90 << "," << p95 << "," << p99 << "," << mean_ios << "," << io_amplification << "," << reorg_running
-        << "\n";
+    ofs << system_names[system_type] << "," << recall_at << "," << L << "," << recall << "," << qps << "," << avg_lat
+        << "," << p50 << "," << p90 << "," << p95 << "," << p99 << "," << mean_ios << "," << io_amplification << ","
+        << reorg_running << "\n";
 
     std::cout << system_names[system_type] << " L=" << L << ": Recall=" << recall << ", QPS=" << qps << ", P99=" << p99
               << "us, MeanIOs=" << mean_ios << std::endl;

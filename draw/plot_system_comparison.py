@@ -96,117 +96,88 @@ def plot_search_latency_comparison(
         print("No data found for search latency comparison")
         return
 
-    # 创建子图
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    suffix = f"_{dataset_tag}" if dataset_tag else ""
+    has_concurrent_schema = all("recall_pct" in df.columns for df in data.values())
+    if not has_concurrent_schema:
+        print("Search latency data is legacy format; skipping exp1 plots.")
+        return
 
-    # 1. QPS vs Recall
-    ax1 = axes[0, 0]
+    summary_rows = []
     for system_name, df in data.items():
-        ax1.plot(
-            df["recall"],
-            df["qps"],
-            marker=MARKERS[system_name],
-            color=COLORS[system_name],
-            linestyle=LINESTYLES[system_name],
-            linewidth=2,
-            markersize=8,
-            label=system_name,
+        target_recall = df.get("recall_target", pd.Series([90.0])).iloc[0]
+        closest_idx = (df["recall_pct"] - target_recall).abs().idxmin()
+        row = df.loc[closest_idx]
+        summary_rows.append(
+            {
+                "System": system_name,
+                "Recall@10(%)": row["recall_pct"],
+                "P50(ms)": row["p50_lat_us"] / 1000.0,
+                "P90(ms)": row["p90_lat_us"] / 1000.0,
+                "P99(ms)": row["p99_lat_us"] / 1000.0,
+                "QPS": row["search_qps"],
+                "Memory(MB)": row["memory_rss_mb"],
+                "MeanIOs": row["mean_ios"],
+            }
         )
-    ax1.set_xlabel("召回率 (Recall@10)", fontsize=13)
-    ax1.set_ylabel("吞吐量 (QPS)", fontsize=13)
-    ax1.set_title("(a) 吞吐量-召回率权衡", fontsize=14, fontweight="bold")
-    ax1.legend(fontsize=12)
-    ax1.grid(True, alpha=0.3)
 
-    # 2. P99 Latency vs Recall
-    ax2 = axes[0, 1]
-    for system_name, df in data.items():
-        ax2.plot(
-            df["recall"],
-            df["p99_lat_us"] / 1000,  # 转换为ms
-            marker=MARKERS[system_name],
-            color=COLORS[system_name],
-            linestyle=LINESTYLES[system_name],
-            linewidth=2,
-            markersize=8,
-            label=system_name,
-        )
-    ax2.set_xlabel("召回率 (Recall@10)", fontsize=13)
-    ax2.set_ylabel("P99延迟 (ms)", fontsize=13)
-    ax2.set_title("(b) P99尾延迟对比", fontsize=14, fontweight="bold")
-    ax2.legend(fontsize=12)
-    ax2.grid(True, alpha=0.3)
+    summary_df = pd.DataFrame(summary_rows)
+    summary_csv = os.path.join(output_dir, f"exp1_target_recall_summary{suffix}.csv")
+    summary_df.to_csv(summary_csv, index=False)
 
-    # 3. 平均延迟分布（箱线图）
-    ax3 = axes[1, 0]
-    target_recall = 0.95  # 选择95%召回率的数据
-    latency_data = []
-    labels = []
-    for system_name, df in data.items():
-        # 找到最接近target_recall的数据点
-        closest_idx = (df["recall"] - target_recall).abs().idxmin()
-        avg_lat = df.loc[closest_idx, "avg_lat_us"] / 1000  # 转换为ms
-        p50 = df.loc[closest_idx, "p50_lat_us"] / 1000
-        p90 = df.loc[closest_idx, "p90_lat_us"] / 1000
-        p99 = df.loc[closest_idx, "p99_lat_us"] / 1000
-
-        # 模拟分布数据用于箱线图
-        latency_data.append([p50, avg_lat, p90, p99])
-        labels.append(system_name)
-
-    positions = np.arange(len(labels))
-    for i, (system_name, data_point) in enumerate(zip(labels, latency_data)):
-        ax3.bar(
-            positions[i],
-            data_point[3],
-            width=0.6,
-            color=COLORS[system_name],
-            alpha=0.7,
-            label=system_name,
-        )
-        # 添加P50, AVG, P90的标记
-        ax3.plot([positions[i]], [data_point[0]], "ko", markersize=6)  # P50
-        ax3.plot([positions[i]], [data_point[1]], "k^", markersize=6)  # AVG
-        ax3.plot([positions[i]], [data_point[2]], "ks", markersize=6)  # P90
-
-    ax3.set_xticks(positions)
-    ax3.set_xticklabels(labels, fontsize=12)
-    ax3.set_ylabel("延迟 (ms)", fontsize=13)
-    ax3.set_title(
-        f"(c) 延迟分布对比 (Recall≈{target_recall:.0%})", fontsize=14, fontweight="bold"
-    )
-    ax3.legend(fontsize=12)
-    ax3.grid(True, alpha=0.3, axis="y")
-
-    # 添加图例说明
-    from matplotlib.lines import Line2D
-
-    custom_lines = [
-        Line2D([0], [0], color="k", marker="o", linestyle="", markersize=6),
-        Line2D([0], [0], color="k", marker="^", linestyle="", markersize=6),
-        Line2D([0], [0], color="k", marker="s", linestyle="", markersize=6),
+    fig, axes = plt.subplots(4, 2, figsize=(16, 16))
+    metrics = [
+        ("p50_lat_us", "P50延迟 (ms)", 1000.0),
+        ("p90_lat_us", "P90延迟 (ms)", 1000.0),
+        ("p99_lat_us", "P99延迟 (ms)", 1000.0),
+        ("search_qps", "吞吐量 (QPS)", 1.0),
+        ("memory_rss_mb", "内存 (MB)", 1.0),
+        ("mean_ios", "平均页面访问数", 1.0),
+        ("recall_pct", "Recall@10 (%)", 1.0),
     ]
-    ax3.legend(custom_lines, ["P50", "AVG", "P90"], loc="upper left", fontsize=10)
 
-    # 4. IO放大率对比
-    ax4 = axes[1, 1]
-    for system_name, df in data.items():
-        ax4.plot(
-            df["recall"],
-            df["io_amplification"],
-            marker=MARKERS[system_name],
-            color=COLORS[system_name],
-            linestyle=LINESTYLES[system_name],
-            linewidth=2,
-            markersize=8,
-            label=system_name,
-        )
-    ax4.set_xlabel("召回率 (Recall@10)", fontsize=13)
-    ax4.set_ylabel("I/O放大率", fontsize=13)
-    ax4.set_title("(d) I/O放大率对比", fontsize=14, fontweight="bold")
-    ax4.legend(fontsize=12)
-    ax4.grid(True, alpha=0.3)
-    ax4.axhline(y=1.0, color="gray", linestyle=":", linewidth=1, label="理想值")
+    dc_reorg_color = "#56B4E9"
+    dc_normal_color = COLORS["DC-PDI"]
+
+    for idx, (metric_key, ylabel, scale) in enumerate(metrics):
+        ax = axes[idx // 2, idx % 2]
+        for system_name, df in data.items():
+            if system_name == "DC-PDI":
+                reorg_mask = (
+                    df.get("reorg_running", pd.Series([0] * len(df))).astype(int) == 1
+                )
+                ax.plot(
+                    df.loc[~reorg_mask, "time_sec"],
+                    df.loc[~reorg_mask, metric_key] / scale,
+                    color=dc_normal_color,
+                    linestyle="-",
+                    linewidth=1.8,
+                    label="DC-PDI (normal)" if idx == 0 else None,
+                )
+                ax.plot(
+                    df.loc[reorg_mask, "time_sec"],
+                    df.loc[reorg_mask, metric_key] / scale,
+                    color=dc_reorg_color,
+                    linestyle="-",
+                    linewidth=1.8,
+                    label="DC-PDI (reorg)" if idx == 0 else None,
+                )
+            else:
+                ax.plot(
+                    df["time_sec"],
+                    df[metric_key] / scale,
+                    color=COLORS[system_name],
+                    linestyle=LINESTYLES[system_name],
+                    linewidth=1.8,
+                    label=system_name if idx == 0 else None,
+                )
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_xlabel("时间 (s)", fontsize=11)
+        ax.set_title(metric_key, fontsize=13, fontweight="bold")
+        ax.grid(True, alpha=0.3)
+        if idx == 0:
+            ax.legend(fontsize=10)
+
+    axes[3, 1].axis("off")
 
     if dataset_label:
         fig.suptitle(f"{dataset_label}", fontsize=15, fontweight="bold")
@@ -214,7 +185,6 @@ def plot_search_latency_comparison(
     else:
         plt.tight_layout()
 
-    suffix = f"_{dataset_tag}" if dataset_tag else ""
     output_file = os.path.join(output_dir, f"fig_search_latency_comparison{suffix}.pdf")
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
     print(f"Saved: {output_file}")

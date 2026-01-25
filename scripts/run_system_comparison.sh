@@ -62,11 +62,11 @@ case $DATASET in
   deep)
     DATA_TYPE="float"
     DATA_DIM=96
-    DATA_FILE="${BASE_DIR}/deep/deep1M_base.bin"
-    QUERY_FILE="${BASE_DIR}/deep/deep1M_query.bin"
-    GT_FILE="${BASE_DIR}/deep/gt_10.bin"
-    INSERT_FILE="${BASE_DIR}/deep/deep_learn.bin"
-    INDEX_BASE="${BASE_DIR}/deep/indices/deep-100m"
+    DATA_FILE="${BASE_DIR}/deep1b/deep1M_base.bin"
+    QUERY_FILE="${BASE_DIR}/deep1b/deep1M_query.bin"
+    GT_FILE="${BASE_DIR}/deep1b/gt_10.bin"
+    INSERT_FILE="${BASE_DIR}/deep1b/deep_learn.bin"
+    INDEX_BASE="${BASE_DIR}/deep1b/indices/deep-100m"
     ;;
   gist)
     DATA_TYPE="uint8"

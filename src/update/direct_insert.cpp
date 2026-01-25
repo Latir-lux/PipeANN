@@ -54,19 +54,27 @@ namespace pipeann {
                          false, &page_ref);
     std::vector<uint32_t> new_nhood;
 
-    // DC-PDI: 使用块感知剪枝（论文4.2节）
-    // 确定目标页面（使用连接强度最高的页面）
+    // DC-PDI优化v2: 块感知剪枝（论文4.2节）
+    // 优化点：
+    // 1. 只处理前16个最近邻来计算目标页面
+    // 2. 使用简化的连接强度计算
 #ifdef ENABLE_BLOCK_AWARE_PRUNE
     uint64_t target_page = 0;
-    if (!page_ref.empty()) {
-      // DC-PDI优化: 使用简化的连接强度计算，用1/dist代替1/dist^1.5
+    // DC-PDI优化v2: 只在有足够邻居时使用块感知剪枝
+    const size_t min_neighbors_for_block_aware = 4;
+    if (!page_ref.empty() && exp_node_info.size() >= min_neighbors_for_block_aware) {
+      // DC-PDI优化v2: 只考虑前16个最近邻
+      const size_t max_to_consider = std::min(exp_node_info.size(), static_cast<size_t>(16));
       std::unordered_map<uint64_t, float> page_strength;
-      for (auto &nbr : exp_node_info) {
+      page_strength.reserve(max_to_consider);
+      
+      for (size_t i = 0; i < max_to_consider; i++) {
+        auto &nbr = exp_node_info[i];
         uint64_t page = node_sector_no(nbr.id);
         float dist = std::max(nbr.distance, 1e-6f);
-        // DC-PDI优化: 简化计算，1/dist 与 1/dist^1.5 在排序上基本一致
         page_strength[page] += 1.0f / dist;
       }
+      
       float max_strength = 0;
       for (auto &[page, strength] : page_strength) {
         if (strength > max_strength) {
@@ -101,20 +109,25 @@ namespace pipeann {
     cur_loc++;  // for target ID, atomic update.
     set_loc2id(target_id, target_id);
 #else
-    // DC-PDI: 使用聚类感知位置分配（论文3.2节）
-    // 根据邻居的距离计算连接强度，选择最优页面
+    // DC-PDI优化v2: 使用聚类感知位置分配（论文3.2节）
+    // 优化点：使用哈希表加速距离查找，从O(n²)降到O(n)
     std::vector<float> neighbor_dists;
     neighbor_dists.reserve(new_nhood.size());
+    
+    // DC-PDI优化v2: 预构建ID到距离的映射表
+    tsl::robin_map<uint32_t, float> id_to_dist;
+    id_to_dist.reserve(exp_node_info.size());
+    for (auto &info : exp_node_info) {
+      id_to_dist[info.id] = info.distance;
+    }
+    
     for (auto &nbr_id : new_nhood) {
-      // 从exp_node_info中找到对应邻居的距离
-      float dist = std::numeric_limits<float>::max();
-      for (auto &info : exp_node_info) {
-        if (info.id == nbr_id) {
-          dist = info.distance;
-          break;
-        }
+      auto it = id_to_dist.find(nbr_id);
+      if (it != id_to_dist.end()) {
+        neighbor_dists.push_back(it->second);
+      } else {
+        neighbor_dists.push_back(std::numeric_limits<float>::max());
       }
-      neighbor_dists.push_back(dist);
     }
     auto locs = this->alloc_loc_clustering_aware(new_nhood.size() + 1, new_nhood, neighbor_dists, pages_need_to_read);
 #endif

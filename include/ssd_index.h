@@ -630,8 +630,10 @@ namespace pipeann {
     /**
      * DC-PDI: 基于聚类感知的位置分配（论文3.2节）
      *
-     * 根据拓扑连接强度选择最优页面，将新节点放置在与其邻居连接最紧密的页面中
-     * 优化版: 使用快速近似计算代替pow()
+     * 优化v2:
+     * - 限制候选页面数量，减少遍历开销
+     * - 使用简化的连接强度计算
+     * - 如果没有找到合适页面，快速回退到标准分配
      *
      * @param n 需要分配的位置数
      * @param new_neighbors 新节点的邻居ID列表
@@ -647,60 +649,76 @@ namespace pipeann {
       int cur = 0;
       uint32_t threshold = (nnodes_per_sector + kIndexSizeFactor - 1) / kIndexSizeFactor;
 
-      // DC-PDI优化: 使用简化的连接强度计算
-      // 原来使用 1/dist^1.5，这里改用 1/(dist * sqrt(dist)) 的近似
-      // 进一步优化: 对于聚类感知分配，只需要相对排序，使用更简单的 1/dist 即可
-      std::unordered_map<uint64_t, float> page_strength;
-
-      for (size_t i = 0; i < new_neighbors.size() && i < neighbor_dists.size(); i++) {
-        uint64_t page = node_sector_no(new_neighbors[i]);
-        float dist = std::max(neighbor_dists[i], 1e-6f);
-        // DC-PDI优化: 使用 1/dist 代替 1/dist^1.5，减少计算开销
-        // 对于分配决策，排序顺序基本一致
-        page_strength[page] += 1.0f / dist;
+      // DC-PDI优化v2: 快速路径 - 如果邻居列表为空，直接使用标准分配
+      if (new_neighbors.empty() || neighbor_dists.empty()) {
+        // 回退到标准分配逻辑
+        goto standard_alloc;
       }
 
-      // 2. 按连接强度排序
-      std::vector<std::pair<uint64_t, float>> sorted_pages(page_strength.begin(), page_strength.end());
-      std::sort(sorted_pages.begin(), sorted_pages.end(),
-                [](const auto &a, const auto &b) { return a.second > b.second; });
+      {
+        // DC-PDI优化v2: 限制处理的邻居数量，减少开销
+        // 只考虑距离最近的前16个邻居（通常已排序）
+        const size_t max_neighbors_to_consider = std::min(new_neighbors.size(), static_cast<size_t>(16));
+        
+        // DC-PDI优化v2: 使用简化的连接强度计算
+        std::unordered_map<uint64_t, float> page_strength;
+        page_strength.reserve(max_neighbors_to_consider);
 
-      // 3. 优先使用高连接强度页面的空槽
-      for (auto &[page, strength] : sorted_pages) {
-        if (cur >= n)
-          break;
+        for (size_t i = 0; i < max_neighbors_to_consider && i < neighbor_dists.size(); i++) {
+          uint64_t page = node_sector_no(new_neighbors[i]);
+          float dist = std::max(neighbor_dists[i], 1e-6f);
+          // 使用 1/dist 代替 1/dist^1.5
+          page_strength[page] += 1.0f / dist;
+        }
+
+        // DC-PDI优化v2: 如果没有有效页面，快速回退
+        if (page_strength.empty()) {
+          goto standard_alloc;
+        }
+
+        // 2. 按连接强度排序
+        std::vector<std::pair<uint64_t, float>> sorted_pages(page_strength.begin(), page_strength.end());
+        std::sort(sorted_pages.begin(), sorted_pages.end(),
+                  [](const auto &a, const auto &b) { return a.second > b.second; });
+
+        // 3. 优先使用高连接强度页面的空槽
+        for (auto &[page, strength] : sorted_pages) {
+          if (cur >= n)
+            break;
 
 #ifdef NO_POLLUTE_ORIGINAL
-        if (page < loc_sector_no(init_num_pts)) {
-          continue;
-        }
+          if (page < loc_sector_no(init_num_pts)) {
+            continue;
+          }
 #endif
 
-        auto st = sector_to_loc(page, 0);
-        auto ed = nnodes_per_sector == 0 ? st + 1 : st + nnodes_per_sector;
+          auto st = sector_to_loc(page, 0);
+          auto ed = nnodes_per_sector == 0 ? st + 1 : st + nnodes_per_sector;
 
-        uint32_t empty_count = 0;
-        for (uint32_t i = st; i < ed; i++) {
-          if (loc2id_[i] == kInvalidID)
-            empty_count++;
-        }
+          uint32_t empty_count = 0;
+          for (uint32_t i = st; i < ed; i++) {
+            if (loc2id_[i] == kInvalidID)
+              empty_count++;
+          }
 
-        if (empty_count < threshold)
-          continue;  // 空槽不足
+          if (empty_count < threshold)
+            continue;  // 空槽不足
 
-        if (empty_count < nnodes_per_sector) {
-          page_need_to_read.insert(page);
-        }
+          if (empty_count < nnodes_per_sector) {
+            page_need_to_read.insert(page);
+          }
 
-        for (uint32_t i = st; i < ed && cur < n; i++) {
-          if (loc2id_[i] == kInvalidID) {
-            loc2id_[i] = kAllocatedID;
-            ret.push_back(i);
-            cur++;
+          for (uint32_t i = st; i < ed && cur < n; i++) {
+            if (loc2id_[i] == kInvalidID) {
+              loc2id_[i] = kAllocatedID;
+              ret.push_back(i);
+              cur++;
+            }
           }
         }
       }
 
+    standard_alloc:
       // 4. 使用空页面回退
       if (cur < n) {
         uint32_t empty_page;

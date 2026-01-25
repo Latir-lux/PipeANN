@@ -212,26 +212,32 @@ namespace pipeann {
     tsl::robin_set<unsigned> on_flight_set;
     on_flight_set.reserve(beam_width * 2);
     
-    // DC-PDI: 记录上一轮发送时的marker位置，用于模拟beam_search的num_seen限制
+    // DC-PDI优化v2: 模拟beam_search的num_seen限制，减少不必要的扫描
+    // 关键优化点：每轮只扫描beam_width个未访问节点，而非全部扫描
     unsigned last_send_marker = 0;
 
-    // DC-PDI优化: 重构为批量发送I/O请求
-    // 设计思路：从retset中按顺序扫描未访问节点，批量发送I/O请求
-    // 使用last_send_marker记录上次扫描位置，避免重复扫描
+    // DC-PDI优化v2: 重构批量发送I/O请求
+    // 核心改进：添加num_seen限制，与beam_search保持一致的扫描策略
     auto send_batch_read_req = [&](uint32_t n, bool new_round) -> unsigned {
       if (n == 0) return 0;
       
       // 如果是新一轮（k指针回退），重置marker从k开始
       unsigned marker = new_round ? k : last_send_marker;
       
+      // DC-PDI优化v2: 添加num_seen限制，避免过度扫描
+      // 这是beam_search的关键优化，每轮最多扫描beam_width个有效节点
+      uint32_t num_seen = 0;
+      
       // 1. 从marker开始收集需要发送的节点
       std::vector<std::pair<unsigned, Neighbor*>> to_send;
       to_send.reserve(n);
       
-      while (marker < cur_list_size && to_send.size() < n) {
+      // DC-PDI优化v2: 添加num_seen < beam_width限制
+      while (marker < cur_list_size && to_send.size() < n && num_seen < beam_width) {
         auto& node = retset[marker];
         // 只检查未访问的节点
         if (!node.visited) {
+          num_seen++;  // DC-PDI优化v2: 计算已扫描的未访问节点数
           // 检查节点: 不在飞行中 + 未在id_buf_map中
           if (on_flight_set.find(node.id) == on_flight_set.end() 
               && id_buf_map.find(node.id) == id_buf_map.end()) {
@@ -326,17 +332,11 @@ namespace pipeann {
       return nk;
     };
 
-    // DC-PDI优化: 检查是否收敛（所有节点都已访问或正在飞行中）
-    auto is_converged = [&]() -> bool {
-      // 从k开始检查，因为k之前的节点都已处理
-      for (unsigned i = k; i < cur_list_size; ++i) {
-        if (!retset[i].visited) {
-          return false;  // 还有未访问的节点
-        }
-      }
-      return true;
-    };
-
+    // DC-PDI优化v2: 简化收敛检测
+    // 关键改进：beam_search使用k>=cur_list_size作为终止条件
+    // 我们只需检查k是否已到达末尾，且没有正在飞行的I/O
+    // 不需要遍历整个列表
+    
     auto print_state = [&]() {
       LOG(INFO) << "cur_list_size: " << cur_list_size;
       for (unsigned i = 0; i < cur_list_size; ++i) {
@@ -369,10 +369,20 @@ namespace pipeann {
     }
 #endif
 
-    // DC-PDI优化: 主循环模仿beam_search的逻辑
-    // 每处理完一个节点后，检查是否需要开始新一轮
+    // DC-PDI优化v2: 主循环 - 严格模仿beam_search的逻辑
+    // 关键改进：
+    // 1. 使用k>=cur_list_size作为主要终止条件
+    // 2. 添加num_seen限制避免过度扫描
+    // 3. 简化收敛检测逻辑
     bool need_new_round = false;
+    unsigned max_iterations = l_search * 10;  // 安全限制，防止死循环
+    unsigned iter_count = 0;
+    
     while (k < cur_list_size || !on_flight_ios.empty()) {
+      if (++iter_count > max_iterations) {
+        break;  // 安全退出
+      }
+      
       // 1. 轮询已完成的I/O
       poll_all();
       
@@ -391,23 +401,23 @@ namespace pipeann {
         }
       }
       
+      // DC-PDI优化v2: 早期终止检查
+      // 如果k已达到l_search，说明前l_search个最近邻都已确定
+      if (k >= l_search && on_flight_ios.empty()) {
+        break;
+      }
+      
       // 4. 发送新的I/O请求（如果有空位）
       unsigned sent = 0;
-      if (on_flight_ios.size() < beam_width) {
+      if (on_flight_ios.size() < beam_width && k < cur_list_size) {
         sent = send_batch_read_req(beam_width - on_flight_ios.size(), need_new_round);
         need_new_round = false;
       }
       
-      // 5. 检查是否收敛或需要重新扫描
-      if (on_flight_ios.empty()) {
-        if (is_converged()) {
-          break;  // 所有节点都已访问，搜索完成
-        }
-        // 还有未访问节点但没发送I/O，强制从k重新开始
-        if (sent == 0) {
-          need_new_round = true;
-          last_send_marker = k;
-        }
+      // 5. 如果没有飞行I/O且无法发送新请求，检查是否完成
+      if (on_flight_ios.empty() && sent == 0) {
+        // 没有更多可发送的节点，搜索完成
+        break;
       }
     }
     

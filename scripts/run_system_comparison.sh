@@ -22,6 +22,12 @@
 #   exp2_update_ratio: 实验2更新集占比(在剩余更新集中取比例, 默认: 1.0)
 #   systems: 要测试的系统 (dc-pdi/ip-diskann/fresh-diskann/all, 逗号分隔, 默认: all)
 #            例如: "dc-pdi,fresh-diskann" 只测试这两个系统
+#
+# 环境变量 (可用于覆盖数据集默认L参数设置):
+#   EXP1_L_INIT: 实验1初始L值 (deep=500, sift=400, gist=600)
+#   EXP1_L_MIN:  实验1 L动态调整最小值 (默认: 50, gist=100)
+#   EXP1_L_MAX:  实验1 L动态调整最大值 (默认: 600, gist=1000)
+#   EXP1_L_STEP: 实验1 L动态调整步长 (默认: 10, gist=20)
 
 set -e
 
@@ -69,6 +75,11 @@ case $DATASET in
     GT_FILE="${BASE_DIR}/bigann/100M_gt.bin"
     INSERT_FILE="${BASE_DIR}/bigann/bigann_learn.bin"  # 用于插入测试
     INDEX_BASE="${BASE_DIR}/bigann/indices/sift-100m"
+    # SIFT数据集L参数配置
+    EXP1_L_INIT=${EXP1_L_INIT:-"400"}    # 初始L值
+    EXP1_L_MIN=${EXP1_L_MIN:-"50"}       # L最小值
+    EXP1_L_MAX=${EXP1_L_MAX:-"600"}      # L最大值
+    EXP1_L_STEP=${EXP1_L_STEP:-"10"}     # L调整步长
     ;;
   deep)
     DATA_TYPE="float"
@@ -78,6 +89,11 @@ case $DATASET in
     GT_FILE="${BASE_DIR}/deep1b/deep1b_gt.bin"
     INSERT_FILE="${BASE_DIR}/deep1b/deep1b_learn.bin"
     INDEX_BASE="${BASE_DIR}/deep1b/indices/deep-1b"
+    # DEEP数据集L参数配置（经测试，500是比较合理的初始值）
+    EXP1_L_INIT=${EXP1_L_INIT:-"500"}    # 初始L值
+    EXP1_L_MIN=${EXP1_L_MIN:-"50"}       # L最小值
+    EXP1_L_MAX=${EXP1_L_MAX:-"800"}      # L最大值
+    EXP1_L_STEP=${EXP1_L_STEP:-"10"}     # L调整步长
     ;;
   gist)
     DATA_TYPE="uint8"
@@ -87,6 +103,11 @@ case $DATASET in
     GT_FILE="${BASE_DIR}/gist/gist_gt.bin"
     INSERT_FILE="${BASE_DIR}/gist/gist_learn.bin"
     INDEX_BASE="${BASE_DIR}/gist/indices/gist"
+    # GIST数据集L参数配置（高维度数据，可能需要更大的L值）
+    EXP1_L_INIT=${EXP1_L_INIT:-"600"}    # 初始L值（高维度需要更大L）
+    EXP1_L_MIN=${EXP1_L_MIN:-"100"}      # L最小值
+    EXP1_L_MAX=${EXP1_L_MAX:-"1000"}     # L最大值
+    EXP1_L_STEP=${EXP1_L_STEP:-"20"}     # L调整步长
     ;;
   *)
     echo "Unknown dataset: $DATASET"
@@ -107,6 +128,10 @@ echo "Exp1 base ratio: $EXP1_BASE_RATIO"
 echo "Exp1 update ratio: $EXP1_UPDATE_RATIO"
 echo "Exp1 duration sec: $EXP1_DURATION_SEC"
 echo "Exp1 target recall: $EXP1_TARGET_RECALL"
+echo "Exp1 L init: $EXP1_L_INIT"
+echo "Exp1 L min: $EXP1_L_MIN"
+echo "Exp1 L max: $EXP1_L_MAX"
+echo "Exp1 L step: $EXP1_L_STEP"
 echo "Exp2 base ratio: $EXP2_BASE_RATIO"
 echo "Exp2 update rate: $EXP2_UPDATE_RATE"
 echo "Exp2 duration sec: $EXP2_DURATION_SEC"
@@ -245,8 +270,9 @@ run_search_latency_exp() {
   echo "[$(date)] Running search latency test for ${system_name}..."
   rm -f "${output_file}"
   ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${gt_file_to_use} \
-    ${EXP1_UPDATE_FILE} ${system_type} 1 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES} \
-    --exp1-duration-sec ${EXP1_DURATION_SEC} --exp1-update-ratio 1.0 --exp1-target-recall ${EXP1_TARGET_RECALL}
+    ${EXP1_UPDATE_FILE} ${system_type} 1 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${EXP1_L_INIT} \
+    --exp1-duration-sec ${EXP1_DURATION_SEC} --exp1-update-ratio 1.0 --exp1-target-recall ${EXP1_TARGET_RECALL} \
+    --exp1-L-min ${EXP1_L_MIN} --exp1-L-max ${EXP1_L_MAX} --exp1-L-step ${EXP1_L_STEP}
   
   echo "[$(date)] Search latency test completed: ${output_file}"
   cleanup_system_index ${system_index}

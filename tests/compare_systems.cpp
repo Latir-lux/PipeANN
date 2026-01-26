@@ -723,6 +723,7 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
                                    float *gt_dists, size_t query_num, size_t gt_dim, T *insert_data, size_t insert_num,
                                    size_t data_dim, uint64_t recall_at, uint64_t L_init, uint32_t beam_width,
                                    double duration_sec, double insert_rate, double target_recall,
+                                   uint64_t L_min, uint64_t L_max, uint64_t L_step,
                                    SystemType system_type, const std::string &output_file) {
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
@@ -730,10 +731,10 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
            "mean_ios,memory_rss_mb,disk_usage_mb,reorg_running\n";
   }
 
-  // L值动态调整参数
-  constexpr uint64_t L_MIN = 50;         // L最小值（提高下限以保证召回率）
-  constexpr uint64_t L_MAX = 600;        // L最大值（允许更大的搜索范围）
-  constexpr uint64_t L_STEP = 10;        // 每次调整步长（增大以更快收敛）
+  // L值动态调整参数 (使用传入的参数)
+  const uint64_t L_MIN = L_min;         // L最小值
+  const uint64_t L_MAX = L_max;         // L最大值
+  const uint64_t L_STEP = L_step;       // 每次调整步长
   constexpr double RECALL_TOLERANCE = 2.0;  // 召回率容忍度（±2%）
   constexpr int STABLE_THRESHOLD = 3;    // 稳定判定所需的连续采样次数
 
@@ -1037,6 +1038,7 @@ void run_search_update_latency_exp(const std::string &index_prefix, const std::s
                                    const std::string &gt_file, const std::string &insert_file, SystemType system_type,
                                    uint64_t recall_at, const std::vector<uint64_t> &L_values, uint32_t beam_width,
                                    double update_ratio, double duration_sec, double target_recall,
+                                   uint64_t L_min, uint64_t L_max, uint64_t L_step,
                                    const std::string &output_file) {
   T *query = nullptr;
   size_t query_num = 0, query_dim = 0;
@@ -1116,7 +1118,7 @@ void run_search_update_latency_exp(const std::string &index_prefix, const std::s
   double insert_rate = (duration_sec > 0) ? (static_cast<double>(insert_num) / duration_sec) : 0.0;
   compare_search_update_latency<T, TagT>(dyn_index, query, gt_ids, gt_dists, query_num, gt_dim, insert_data, insert_num,
                                          query_dim, recall_at, L_disk, beam_width, duration_sec, insert_rate,
-                                         target_recall, system_type, output_file);
+                                         target_recall, L_min, L_max, L_step, system_type, output_file);
 
   delete[] query;
   delete[] gt_ids;
@@ -1179,6 +1181,7 @@ int main(int argc, char **argv) {
               << " <output_dir> <num_threads> [recall_at] [L_values...]"
               << " [--exp1-duration-sec <sec>] [--exp1-update-ratio <ratio>]"
               << " [--exp1-target-recall <recall_pct>]"
+              << " [--exp1-L-min <min>] [--exp1-L-max <max>] [--exp1-L-step <step>]"
               << " [--exp3-duration-sec <sec>] [--exp3-update-ratio <ratio>]\n";
     std::cout << "\nParameters:\n";
     std::cout << "  data_type: uint8/int8/float\n";
@@ -1187,6 +1190,9 @@ int main(int argc, char **argv) {
     std::cout << "  --exp1-duration-sec: fixed duration for experiment 1 (seconds)\n";
     std::cout << "  --exp1-update-ratio: fraction of insert dataset to use in experiment 1\n";
     std::cout << "  --exp1-target-recall: target recall@K percentage for reporting\n";
+    std::cout << "  --exp1-L-min: minimum L value for dynamic adjustment (default: 50)\n";
+    std::cout << "  --exp1-L-max: maximum L value for dynamic adjustment (default: 600)\n";
+    std::cout << "  --exp1-L-step: L value adjustment step size (default: 10)\n";
     std::cout << "  --exp3-duration-sec: fixed duration for experiment 3 (seconds)\n";
     std::cout << "  --exp3-update-ratio: fraction of insert dataset to use in experiment 3\n";
     return -1;
@@ -1208,6 +1214,9 @@ int main(int argc, char **argv) {
   double exp1_duration_sec = 180.0;
   double exp1_update_ratio = 1.0;
   double exp1_target_recall = 90.0;
+  uint64_t exp1_L_min = 50;      // L动态调整最小值
+  uint64_t exp1_L_max = 600;     // L动态调整最大值
+  uint64_t exp1_L_step = 10;     // L动态调整步长
   double exp3_duration_sec = 120.0;
   double exp3_update_ratio = 1.0;
 
@@ -1237,6 +1246,30 @@ int main(int argc, char **argv) {
       }
       if (arg == "--exp1-target-recall" && i + 1 < argc) {
         exp1_target_recall = std::stod(argv[++i]);
+        continue;
+      }
+      if (arg.rfind("--exp1-L-min=", 0) == 0) {
+        exp1_L_min = std::stoull(arg.substr(strlen("--exp1-L-min=")));
+        continue;
+      }
+      if (arg == "--exp1-L-min" && i + 1 < argc) {
+        exp1_L_min = std::stoull(argv[++i]);
+        continue;
+      }
+      if (arg.rfind("--exp1-L-max=", 0) == 0) {
+        exp1_L_max = std::stoull(arg.substr(strlen("--exp1-L-max=")));
+        continue;
+      }
+      if (arg == "--exp1-L-max" && i + 1 < argc) {
+        exp1_L_max = std::stoull(argv[++i]);
+        continue;
+      }
+      if (arg.rfind("--exp1-L-step=", 0) == 0) {
+        exp1_L_step = std::stoull(arg.substr(strlen("--exp1-L-step=")));
+        continue;
+      }
+      if (arg == "--exp1-L-step" && i + 1 < argc) {
+        exp1_L_step = std::stoull(argv[++i]);
         continue;
       }
       if (arg.rfind("--exp3-duration-sec=", 0) == 0) {
@@ -1277,15 +1310,17 @@ int main(int argc, char **argv) {
     if (data_type == "uint8") {
       run_search_update_latency_exp<uint8_t, uint32_t>(
           index_prefix, query_file, gt_file, insert_file, (SystemType) system_type, recall_at, L_values, 4,
-          exp1_update_ratio, exp1_duration_sec, exp1_target_recall, output);
+          exp1_update_ratio, exp1_duration_sec, exp1_target_recall, exp1_L_min, exp1_L_max, exp1_L_step, output);
     } else if (data_type == "int8") {
       run_search_update_latency_exp<int8_t, uint32_t>(index_prefix, query_file, gt_file, insert_file,
                                                       (SystemType) system_type, recall_at, L_values, 4,
-                                                      exp1_update_ratio, exp1_duration_sec, exp1_target_recall, output);
+                                                      exp1_update_ratio, exp1_duration_sec, exp1_target_recall,
+                                                      exp1_L_min, exp1_L_max, exp1_L_step, output);
     } else if (data_type == "float") {
       run_search_update_latency_exp<float, uint32_t>(index_prefix, query_file, gt_file, insert_file,
                                                      (SystemType) system_type, recall_at, L_values, 4,
-                                                     exp1_update_ratio, exp1_duration_sec, exp1_target_recall, output);
+                                                     exp1_update_ratio, exp1_duration_sec, exp1_target_recall,
+                                                     exp1_L_min, exp1_L_max, exp1_L_step, output);
     } else {
       std::cerr << "Unsupported data type: " << data_type << std::endl;
       return -1;

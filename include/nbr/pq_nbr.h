@@ -40,8 +40,13 @@ namespace pipeann {
       pq_nbr_handler->data.resize(new_npoints * this->pq_table.n_chunks);
 #pragma omp parallel for num_threads(nthreads)
       for (uint64_t i = 0; i < new_npoints; ++i) {
+        uint32_t old_id = 0;
+        if (!rev_id_map.find(i, old_id)) {
+          LOG(ERROR) << "Missing reverse mapping for new ID: " << i;
+          continue;
+        }
         memcpy(pq_nbr_handler->data.data() + i * this->pq_table.n_chunks,
-               this->data.data() + rev_id_map.find(i) * this->pq_table.n_chunks, this->pq_table.n_chunks);
+               this->data.data() + old_id * this->pq_table.n_chunks, this->pq_table.n_chunks);
       }
       pq_nbr_handler->pq_table = std::move(this->pq_table);
       pq_nbr_handler->npoints = new_npoints;

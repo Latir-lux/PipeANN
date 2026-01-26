@@ -76,10 +76,10 @@ case $DATASET in
     INSERT_FILE="${BASE_DIR}/bigann/bigann_learn.bin"  # 用于插入测试
     INDEX_BASE="${BASE_DIR}/bigann/indices/sift-100m"
     # SIFT数据集L参数配置
-    EXP1_L_INIT=${EXP1_L_INIT:-"400"}    # 初始L值
-    EXP1_L_MIN=${EXP1_L_MIN:-"50"}       # L最小值
-    EXP1_L_MAX=${EXP1_L_MAX:-"600"}      # L最大值
-    EXP1_L_STEP=${EXP1_L_STEP:-"10"}     # L调整步长
+    EXP1_L_INIT=${EXP1_L_INIT:-"30"}    # 初始L值
+    EXP1_L_MIN=${EXP1_L_MIN:-"10"}       # L最小值
+    EXP1_L_MAX=${EXP1_L_MAX:-"100"}      # L最大值
+    EXP1_L_STEP=${EXP1_L_STEP:-"5"}     # L调整步长
     ;;
   deep)
     DATA_TYPE="float"
@@ -90,10 +90,10 @@ case $DATASET in
     INSERT_FILE="${BASE_DIR}/deep1b/deep1b_learn.bin"
     INDEX_BASE="${BASE_DIR}/deep1b/indices/deep-1b"
     # DEEP数据集L参数配置（经测试，500是比较合理的初始值）
-    EXP1_L_INIT=${EXP1_L_INIT:-"500"}    # 初始L值
-    EXP1_L_MIN=${EXP1_L_MIN:-"50"}       # L最小值
-    EXP1_L_MAX=${EXP1_L_MAX:-"800"}      # L最大值
-    EXP1_L_STEP=${EXP1_L_STEP:-"10"}     # L调整步长
+    EXP1_L_INIT=${EXP1_L_INIT:-"30"}    # 初始L值
+    EXP1_L_MIN=${EXP1_L_MIN:-"10"}       # L最小值
+    EXP1_L_MAX=${EXP1_L_MAX:-"100"}      # L最大值
+    EXP1_L_STEP=${EXP1_L_STEP:-"5"}     # L调整步长
     ;;
   gist)
     DATA_TYPE="uint8"
@@ -104,10 +104,10 @@ case $DATASET in
     INSERT_FILE="${BASE_DIR}/gist/gist_learn.bin"
     INDEX_BASE="${BASE_DIR}/gist/indices/gist"
     # GIST数据集L参数配置（高维度数据，可能需要更大的L值）
-    EXP1_L_INIT=${EXP1_L_INIT:-"600"}    # 初始L值（高维度需要更大L）
-    EXP1_L_MIN=${EXP1_L_MIN:-"100"}      # L最小值
-    EXP1_L_MAX=${EXP1_L_MAX:-"1000"}     # L最大值
-    EXP1_L_STEP=${EXP1_L_STEP:-"20"}     # L调整步长
+    EXP1_L_INIT=${EXP1_L_INIT:-"30"}    # 初始L值（高维度需要更大L）
+    EXP1_L_MIN=${EXP1_L_MIN:-"10"}      # L最小值
+    EXP1_L_MAX=${EXP1_L_MAX:-"100"}     # L最大值
+    EXP1_L_STEP=${EXP1_L_STEP:-"5"}     # L调整步长
     ;;
   *)
     echo "Unknown dataset: $DATASET"

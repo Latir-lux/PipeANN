@@ -21,9 +21,8 @@
 #include <sys/syscall.h>
 #include "linux_aligned_file_reader.h"
 
-
-// 
-// 
+//
+//
 /* 实现SSDIndex的删除合并流程 包括已删除节点的索引重新整理 移除已删除节点 生成新索引
    主要有以下几个部分：
    当 DynamicSSDIndex 中积累了许多 lazy deletion 标记时
@@ -53,7 +52,7 @@ namespace pipeann {
     // Step 1 扫描所有节点 构建新的ID映射 手机被删节点邻居
     libcuckoo::cuckoohash_map<uint32_t, uint32_t> id_map, rev_id_map;           // old_id -> new_id & new_id -> old_id
     libcuckoo::cuckoohash_map<uint32_t, std::vector<uint32_t>> deleted_nhoods;  // id -> nhood
-    std::atomic<uint64_t> new_npoints = 0;  // 删除后节点ID初始化
+    std::atomic<uint64_t> new_npoints = 0;                                      // 删除后节点ID初始化
     Timer delete_timer;
 
     // 初始化缓冲区
@@ -118,7 +117,8 @@ namespace pipeann {
       }
     }
     LOG(INFO) << "Finished populating neighborhoods, totally elapsed: " << delete_timer.elapsed() / 1e3
-              << "ms, new npoints: " << new_npoints.load() << " " << "id_map size: " << id_map.size();
+              << "ms, new npoints: " << new_npoints.load() << " "
+              << "id_map size: " << id_map.size();
     LOG(INFO) << "Deleted nodes size: " << deleted_nodes.size() << ", deleted_nhoods size: " << deleted_nhoods.size();
 
     // Step 2: prune neighbors, populate PQ and tags.
@@ -179,8 +179,12 @@ namespace pipeann {
           uint32_t nbr_tag = id2tag(node.nbrs[i]);
           if (deleted_nodes_set.find(nbr_tag) != deleted_nodes_set.end()) {
             // deleted, insert neighbors.
-            const auto &nhoods = deleted_nhoods.find(node.nbrs[i]);
-            nhood_set.insert(nhoods.begin(), nhoods.end());
+            std::vector<uint32_t> deleted_nbrs;
+            if (deleted_nhoods.find(node.nbrs[i], deleted_nbrs)) {
+              nhood_set.insert(deleted_nbrs.begin(), deleted_nbrs.end());
+            } else {
+              LOG(ERROR) << "Deleted node " << node.nbrs[i] << " has no neighborhood snapshot.";
+            }
           } else {
             nhood_set.insert(node.nbrs[i]);
             // LOG(INFO) << id << " insert " << node.nbrs[i];
@@ -211,15 +215,32 @@ namespace pipeann {
         }
 
         // map to new IDs.
-        for (auto &nbr : nhood) {
-          nbr = id_map.find(nbr);
-          if (unlikely(nbr > new_npoints)) {
-            LOG(ERROR) << "Invalid neighbor ID: " << nbr << ", new_npoints: " << new_npoints;
+        std::vector<uint32_t> remapped_nhood;
+        remapped_nhood.reserve(nhood.size());
+        const uint64_t max_new_id = new_npoints.load();
+        for (auto nbr : nhood) {
+          if (unlikely(nbr == kInvalidID || nbr == kAllocatedID)) {
+            continue;
           }
+          uint32_t mapped_nbr = 0;
+          if (!id_map.find(nbr, mapped_nbr)) {
+            LOG(ERROR) << "Missing mapping for neighbor ID: " << nbr;
+            continue;
+          }
+          if (unlikely(mapped_nbr >= max_new_id)) {
+            LOG(ERROR) << "Invalid neighbor mapping: " << mapped_nbr << ", new_npoints: " << max_new_id;
+            continue;
+          }
+          remapped_nhood.push_back(mapped_nbr);
         }
+        nhood.swap(remapped_nhood);
 
         // write neighbors.
-        uint64_t new_id = id_map.find(id);
+        uint32_t new_id = 0;
+        if (!id_map.find(id, new_id)) {
+          LOG(ERROR) << "Missing mapping for node ID: " << id;
+          continue;
+        }
         uint64_t off = new_id % kVecInWBuf;
         auto page_wbuf = wbuf + (off / nnodes_per_sector) * SECTOR_LEN;
         auto loc_wbuf = offset_to_loc(page_wbuf, off);
@@ -249,8 +270,13 @@ namespace pipeann {
 
     while (deleted_nodes_set.find(id2tag(medoid)) != deleted_nodes_set.end()) {
       LOG(INFO) << "Medoid deleted. Choosing another start node. Medoid ID: " << medoid << " tag: " << id2tag(medoid);
-      const auto &nhoods = deleted_nhoods.find(medoid);
-      medoid = nhoods[0];
+      std::vector<uint32_t> medoid_nhood;
+      if (!deleted_nhoods.find(medoid, medoid_nhood) || medoid_nhood.empty()) {
+        LOG(ERROR) << "Deleted medoid has no valid neighbors; falling back to new ID 0.";
+        medoid = 0;
+        break;
+      }
+      medoid = medoid_nhood[0];
     }
     close(fd);
     // free buf
@@ -261,7 +287,16 @@ namespace pipeann {
     merge_lock.lock();  // unlock in reload().
     // metadata.
     this->num_points = new_npoints;
-    this->medoid = id_map.find(medoid);
+    uint32_t mapped_medoid = 0;
+    if (!id_map.find(medoid, mapped_medoid)) {
+      if (new_npoints > 0) {
+        LOG(ERROR) << "Medoid mapping missing; falling back to new ID 0.";
+        mapped_medoid = 0;
+      } else {
+        LOG(ERROR) << "Medoid mapping missing and index is empty.";
+      }
+    }
+    this->medoid = mapped_medoid;
     // PQ.
     auto tmp = this->nbr_handler;
     this->nbr_handler = new_nbr_handler;

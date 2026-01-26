@@ -3,7 +3,7 @@
 # 运行DC-PDI、IP-DiskANN和FreshDiskANN的对比实验
 #
 # 使用方法:
-#   ./scripts/run_system_comparison.sh [experiment] [dataset] [base_dir] [output_dir] [exp1_base_ratio] [exp1_update_ratio] [exp1_duration_sec] [exp1_target_recall] [exp2_base_ratio] [exp2_update_rate] [exp2_duration_sec] [exp3_base_ratio] [exp3_update_ratio] [exp3_duration_sec] [exp2_update_ratio] [systems]
+#   ./scripts/run_system_comparison.sh [experiment] [dataset] [base_dir] [output_dir] [exp1_base_ratio] [exp1_update_ratio] [exp1_duration_sec] [exp1_target_recall] [exp2_base_ratio] [exp2_update_rate] [exp2_duration_sec] [exp3_base_ratio] [exp3_update_ratio] [exp3_duration_sec] [exp2_update_ratio] [systems] [build_ram_gb]
 #
 # 参数:
 #   experiment: 1/2/3/all (默认: all)
@@ -22,6 +22,7 @@
 #   exp2_update_ratio: 实验2更新集占比(在剩余更新集中取比例, 默认: 1.0)
 #   systems: 要测试的系统 (dc-pdi/ip-diskann/fresh-diskann/all, 逗号分隔, 默认: all)
 #            例如: "dc-pdi,fresh-diskann" 只测试这两个系统
+#   build_ram_gb: 构建磁盘索引的内存预算 (GB, 默认: 128)
 #
 # 环境变量 (可用于覆盖数据集默认L参数设置):
 #   EXP1_L_INIT: 实验1初始L值 (deep=500, sift=400, gist=600)
@@ -48,18 +49,9 @@ EXP3_UPDATE_RATIO=${13:-"0.5"}
 EXP3_DURATION_SEC=${14:-"120"}
 EXP2_UPDATE_RATIO=${15:-${EXP2_UPDATE_RATIO:-"1.0"}}
 SYSTEMS_TO_TEST=${16:-"all"}
+BUILD_RAM_GB=${17:-${BUILD_RAM_GB:-"128"}}
 NUM_THREADS=32
 RECALL_AT=10
-
-TOTAL_MEM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || true)
-if [ -n "${TOTAL_MEM_KB}" ]; then
-  BUILD_RAM_GB=$(awk -v kb="${TOTAL_MEM_KB}" 'BEGIN { printf "%d", kb / 1024 / 1024 / 2 }')
-else
-  BUILD_RAM_GB=128
-fi
-if [ "${BUILD_RAM_GB}" -lt 1 ]; then
-  BUILD_RAM_GB=1
-fi
 
 # 为不同数据集隔离输出目录，避免覆盖
 RESULTS_DIR="${OUTPUT_DIR}/${DATASET}"
@@ -314,7 +306,8 @@ run_search_latency_exp() {
   PIPEANN_DISABLE_DISPERSION_MONITOR=${disable_dispersion} ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${gt_file_to_use} \
     ${EXP1_UPDATE_FILE} ${system_type} 1 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${EXP1_L_INIT} \
     --exp1-duration-sec ${EXP1_DURATION_SEC} --exp1-update-ratio 1.0 --exp1-target-recall ${EXP1_TARGET_RECALL} \
-    --exp1-L-min ${EXP1_L_MIN} --exp1-L-max ${EXP1_L_MAX} --exp1-L-step ${EXP1_L_STEP}
+    --exp1-L-min ${EXP1_L_MIN} --exp1-L-max ${EXP1_L_MAX} --exp1-L-step ${EXP1_L_STEP} \
+    --build-ram-gb ${BUILD_RAM_GB}
   
   echo "[$(date)] Search latency test completed: ${output_file}"
   cleanup_system_index ${system_index}
@@ -342,7 +335,8 @@ run_update_throughput_exp() {
     disable_dispersion=1
   fi
   PIPEANN_DISABLE_DISPERSION_MONITOR=${disable_dispersion} ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
-    ${insert_file} ${system_type} 2 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT}
+    ${insert_file} ${system_type} 2 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} \
+    --build-ram-gb ${BUILD_RAM_GB}
   
   echo "[$(date)] Update throughput test completed: ${output_file}"
   cleanup_system_index ${system_index}
@@ -797,7 +791,8 @@ run_concurrent_exp() {
   fi
   PIPEANN_DISABLE_DISPERSION_MONITOR=${disable_dispersion} ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
     ${insert_file} ${system_type} 3 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES} \
-    --exp3-duration-sec ${duration_sec} --exp3-update-ratio 1.0
+    --exp3-duration-sec ${duration_sec} --exp3-update-ratio 1.0 \
+    --build-ram-gb ${BUILD_RAM_GB}
   
   echo "[$(date)] Concurrent test completed: ${output_file}"
   cleanup_system_index ${system_index}

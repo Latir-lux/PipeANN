@@ -185,6 +185,7 @@ const int NUM_SEARCH_THREADS = 32;
 const int NUM_INSERT_THREADS = 10;
 const int NUM_DELETE_THREADS = 1;
 const int MERGE_INTERVAL = 10000;  // FreshDiskANN每10000次更新合并一次
+static uint32_t BUILD_RAM_GB = 0;
 
 // 获取内存使用
 void get_memory_usage(double &rss_kb, double &vm_kb) {
@@ -439,8 +440,7 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
  */
 template<typename T, typename TagT = uint32_t>
 void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *insert_data, size_t num_inserts,
-                               size_t data_dim, SystemType system_type, bool trigger_merge,
-                               const std::string &output_file) {
+                               size_t data_dim, SystemType system_type, const std::string &output_file) {
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
     ofs << "system,time_sec,num_inserts,throughput_ops,memory_rss_mb,disk_usage_mb,merge_triggered,reorg_running\n";
@@ -467,13 +467,6 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
       TagT tag = static_cast<TagT>(base_tag_offset + idx);  // 与GT ID对齐
       index.insert(insert_data + idx * data_dim, tag);
       local_count++;
-
-      // FreshDiskANN模式: 周期性触发合并
-      if (system_type == FRESH_DISKANN && trigger_merge && idx % MERGE_INTERVAL == MERGE_INTERVAL - 1) {
-        std::cout << "[" << system_names[system_type] << "] Triggering merge at " << idx << " inserts" << std::endl;
-        index.final_merge(NUM_SEARCH_THREADS);
-        merge_done.store(true);
-      }
     }
   };
 
@@ -524,7 +517,7 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
   std::cout << "[" << system_names[system_type] << "] Insert completed: " << num_inserts << " ops in " << total_time
             << "s, throughput=" << final_throughput << " ops/s" << std::endl;
 
-  if (system_type == FRESH_DISKANN && trigger_merge && !merge_done.load()) {
+  if (system_type == FRESH_DISKANN && !merge_done.load()) {
     uint64_t final_inserts = insert_count.load();
     if (final_inserts > 0) {
       std::cout << "[" << system_names[system_type] << "] Forcing final merge at " << final_inserts << " inserts"
@@ -617,11 +610,6 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
 
       TagT tag = static_cast<TagT>(base_tag_offset + idx);
       index.insert(insert_data + idx * data_dim, tag);
-
-      // FreshDiskANN模式: 周期性合并
-      if (system_type == FRESH_DISKANN && idx % MERGE_INTERVAL == MERGE_INTERVAL - 1) {
-        index.final_merge(NUM_SEARCH_THREADS / 2);
-      }
 
       if (duration_sec > 0 && insert_rate > 0) {
         while (!stop_test.load()) {
@@ -841,10 +829,6 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
       TagT tag = static_cast<TagT>(base_tag_offset + idx);
       index.insert(insert_data + idx * data_dim, tag);
 
-      if (system_type == FRESH_DISKANN && idx % MERGE_INTERVAL == MERGE_INTERVAL - 1) {
-        index.final_merge(NUM_SEARCH_THREADS / 2);
-      }
-
       if (duration_sec > 0 && insert_rate > 0) {
         while (!stop_test.load()) {
           double elapsed_now = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
@@ -1054,8 +1038,11 @@ void run_concurrent_exp(const std::string &index_prefix, const std::string &quer
   auto *dist_cmp = pipeann::get_distance_function<T>(metric);
   int search_mode = (system_type == DC_PDI) ? PIPE_SEARCH : BEAM_SEARCH;
 
+  bool use_buffered_updates = (system_type == FRESH_DISKANN);
+  size_t buffer_max_points = use_buffered_updates ? static_cast<size_t>(MERGE_INTERVAL) : 0;
   pipeann::DynamicSSDIndex<T, TagT> dyn_index(paras, index_prefix, index_prefix + "_merge", dist_cmp, metric,
-                                              search_mode, false);
+                                              search_mode, false, use_buffered_updates, buffer_max_points, 0,
+                                              BUILD_RAM_GB);
 
   double insert_rate = (duration_sec > 0) ? (static_cast<double>(insert_num) / duration_sec) : 0.0;
   compare_concurrent_performance<T, TagT>(dyn_index, query, insert_data, query_num, insert_num, query_dim, recall_at,
@@ -1144,8 +1131,11 @@ void run_search_update_latency_exp(const std::string &index_prefix, const std::s
   auto *dist_cmp = pipeann::get_distance_function<T>(metric);
   int search_mode = (system_type == DC_PDI) ? PIPE_SEARCH : BEAM_SEARCH;
 
+  bool use_buffered_updates = (system_type == FRESH_DISKANN);
+  size_t buffer_max_points = use_buffered_updates ? static_cast<size_t>(MERGE_INTERVAL) : 0;
   pipeann::DynamicSSDIndex<T, TagT> dyn_index(paras, index_prefix, index_prefix + "_merge", dist_cmp, metric,
-                                              search_mode, false);
+                                              search_mode, false, use_buffered_updates, buffer_max_points, 0,
+                                              BUILD_RAM_GB);
 
   double insert_rate = (duration_sec > 0) ? (static_cast<double>(insert_num) / duration_sec) : 0.0;
   compare_search_update_latency<T, TagT>(dyn_index, query, gt_ids, gt_dists, query_num, gt_dim, insert_data, insert_num,
@@ -1184,8 +1174,11 @@ void run_update_throughput_exp(const std::string &index_prefix, const std::strin
   auto *dist_cmp = pipeann::get_distance_function<T>(metric);
   int search_mode = (system_type == DC_PDI) ? PIPE_SEARCH : BEAM_SEARCH;
 
+  bool use_buffered_updates = (system_type == FRESH_DISKANN);
+  size_t buffer_max_points = use_buffered_updates ? static_cast<size_t>(MERGE_INTERVAL) : 0;
   pipeann::DynamicSSDIndex<T, TagT> dyn_index(paras, index_prefix, index_prefix + "_merge", dist_cmp, metric,
-                                              search_mode, false);
+                                              search_mode, false, use_buffered_updates, buffer_max_points, 0,
+                                              BUILD_RAM_GB);
 
   if (dyn_index._disk_index != nullptr && dyn_index._disk_index->data_dim != insert_dim) {
     std::cerr << "Error: Insert dim (" << insert_dim << ") does not match index dim ("
@@ -1195,9 +1188,7 @@ void run_update_throughput_exp(const std::string &index_prefix, const std::strin
     return;
   }
 
-  bool trigger_merge = (system_type == FRESH_DISKANN);
-  compare_update_throughput<T, TagT>(dyn_index, insert_data, insert_num, insert_dim, system_type, trigger_merge,
-                                     output_file);
+  compare_update_throughput<T, TagT>(dyn_index, insert_data, insert_num, insert_dim, system_type, output_file);
 
   delete[] insert_data;
   delete dist_cmp;
@@ -1214,7 +1205,8 @@ int main(int argc, char **argv) {
               << " [--exp1-duration-sec <sec>] [--exp1-update-ratio <ratio>]"
               << " [--exp1-target-recall <recall_pct>]"
               << " [--exp1-L-min <min>] [--exp1-L-max <max>] [--exp1-L-step <step>]"
-              << " [--exp3-duration-sec <sec>] [--exp3-update-ratio <ratio>]\n";
+              << " [--exp3-duration-sec <sec>] [--exp3-update-ratio <ratio>]"
+              << " [--build-ram-gb <gb>]\n";
     std::cout << "\nParameters:\n";
     std::cout << "  data_type: uint8/int8/float\n";
     std::cout << "  system_type: 0=DC-PDI, 1=IP-DiskANN, 2=FreshDiskANN\n";
@@ -1251,6 +1243,7 @@ int main(int argc, char **argv) {
   uint64_t exp1_L_step = 10;  // L动态调整步长
   double exp3_duration_sec = 120.0;
   double exp3_update_ratio = 1.0;
+  BUILD_RAM_GB = 32;
 
   std::vector<uint64_t> L_values;
   if (argc > arg_no) {
@@ -1318,6 +1311,14 @@ int main(int argc, char **argv) {
       }
       if (arg == "--exp3-update-ratio" && i + 1 < argc) {
         exp3_update_ratio = std::stod(argv[++i]);
+        continue;
+      }
+      if (arg.rfind("--build-ram-gb=", 0) == 0) {
+        BUILD_RAM_GB = static_cast<uint32_t>(std::stoul(arg.substr(strlen("--build-ram-gb="))));
+        continue;
+      }
+      if (arg == "--build-ram-gb" && i + 1 < argc) {
+        BUILD_RAM_GB = static_cast<uint32_t>(std::stoul(argv[++i]));
         continue;
       }
       L_values.push_back(atoi(argv[i]));

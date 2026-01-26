@@ -178,6 +178,13 @@ namespace pipeann {
 
     void load_tags(const std::string &tag_file, size_t offset = 0);
 
+    bool is_data_normalized() const {
+      return data_is_normalized;
+    }
+
+    void export_live_points(const std::string &out_data_bin, const std::string &out_tags_bin,
+                            const tsl::robin_set<TagT> &deleted_tags, uint32_t nthreads = 0);
+
     uint64_t return_nd();
 
     // search supporting update.

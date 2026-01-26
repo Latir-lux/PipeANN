@@ -166,6 +166,98 @@ namespace pipeann {
     return 0;
   }
 
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::export_live_points(const std::string &out_data_bin, const std::string &out_tags_bin,
+                                             const tsl::robin_set<TagT> &deleted_tags, uint32_t nthreads) {
+    if (!enable_tags) {
+      LOG(ERROR) << "Tags are disabled, cannot export live points.";
+      exit(-1);
+    }
+    if (nthreads == 0) {
+      nthreads = this->max_nthreads;
+    }
+
+    std::ofstream data_writer;
+    std::ofstream tags_writer;
+    open_file_to_write(data_writer, out_data_bin);
+    open_file_to_write(tags_writer, out_tags_bin);
+
+    int npts_i32 = 0;
+    int dims_i32 = static_cast<int>(data_dim);
+    int tag_dim_i32 = 1;
+    data_writer.write(reinterpret_cast<const char *>(&npts_i32), sizeof(int));
+    data_writer.write(reinterpret_cast<const char *>(&dims_i32), sizeof(int));
+    tags_writer.write(reinterpret_cast<const char *>(&npts_i32), sizeof(int));
+    tags_writer.write(reinterpret_cast<const char *>(&tag_dim_i32), sizeof(int));
+
+    uint64_t exported = 0;
+
+    if (nnodes_per_sector == 0) {
+      std::vector<T> vec(data_dim);
+      for (uint32_t id = 0; id < cur_id; ++id) {
+        TagT tag = id2tag(id);
+        if (deleted_tags.find(tag) != deleted_tags.end()) {
+          continue;
+        }
+        if (get_vector_by_id(id, vec.data()) != 0) {
+          continue;
+        }
+        data_writer.write(reinterpret_cast<const char *>(vec.data()), data_dim * sizeof(T));
+        tags_writer.write(reinterpret_cast<const char *>(&tag), sizeof(TagT));
+        exported++;
+      }
+    } else {
+      constexpr uint64_t kSectorsPerExport = 1024;
+      void *ctx = reader->get_ctx();
+      char *rbuf = nullptr;
+      alloc_aligned((void **) &rbuf, kSectorsPerExport * size_per_io, SECTOR_LEN);
+
+      uint64_t n_sectors = (cur_loc + nnodes_per_sector - 1) / nnodes_per_sector;
+      for (uint64_t sector = 0; sector < n_sectors; sector += kSectorsPerExport) {
+        uint64_t st_sector = sector;
+        uint64_t ed_sector = std::min(sector + kSectorsPerExport, n_sectors);
+        uint64_t loc_st = st_sector * nnodes_per_sector;
+        uint64_t loc_ed = std::min(cur_loc.load(), ed_sector * nnodes_per_sector);
+        uint64_t n_sectors_to_read = ed_sector - st_sector;
+        std::vector<IORequest> read_reqs;
+        read_reqs.emplace_back(
+            IORequest(loc_sector_no(loc_st) * SECTOR_LEN, n_sectors_to_read * size_per_io, rbuf, 0, 0));
+        reader->read(read_reqs, ctx, false);
+
+        for (uint64_t loc = loc_st; loc < loc_ed; ++loc) {
+          uint32_t id = loc2id(loc);
+          if (id == kInvalidID || id == kAllocatedID) {
+            continue;
+          }
+          TagT tag = id2tag(id);
+          if (deleted_tags.find(tag) != deleted_tags.end()) {
+            continue;
+          }
+          uint64_t rel_sector = (loc / nnodes_per_sector) - st_sector;
+          char *page_buf = rbuf + rel_sector * SECTOR_LEN;
+          char *node_buf = offset_to_loc(page_buf, loc);
+          T *coords = offset_to_node_coords(node_buf);
+          data_writer.write(reinterpret_cast<const char *>(coords), data_dim * sizeof(T));
+          tags_writer.write(reinterpret_cast<const char *>(&tag), sizeof(TagT));
+          exported++;
+        }
+      }
+      aligned_free(rbuf);
+    }
+
+    data_writer.seekp(0);
+    tags_writer.seekp(0);
+    npts_i32 = static_cast<int>(exported);
+    data_writer.write(reinterpret_cast<const char *>(&npts_i32), sizeof(int));
+    data_writer.write(reinterpret_cast<const char *>(&dims_i32), sizeof(int));
+    tags_writer.write(reinterpret_cast<const char *>(&npts_i32), sizeof(int));
+    tags_writer.write(reinterpret_cast<const char *>(&tag_dim_i32), sizeof(int));
+    data_writer.close();
+    tags_writer.close();
+
+    LOG(INFO) << "Exported " << exported << " live points to " << out_data_bin;
+  }
+
   // part3 buffer管理
   // 为每个查询线程创建两个buffer(读取缓冲 + scratch)
   template<typename T, typename TagT>

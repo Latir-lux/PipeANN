@@ -11,6 +11,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <memory>
 
 namespace pipeann {
 
@@ -23,7 +24,8 @@ namespace pipeann {
     */
     DynamicSSDIndex(Parameters &parameters, const std::string disk_prefix_in, const std::string disk_prefix_out,
                     Distance<T> *dist, pipeann::Metric disk_metric, int search_mode = BEAM_SEARCH,
-                    bool use_mem_index = false);
+                    bool use_mem_index = false, bool use_buffered_updates = false, size_t buffer_max_points = 0,
+                    uint32_t buffer_search_L = 0, uint32_t build_ram_gb = 0);
 
     ~DynamicSSDIndex();
 
@@ -46,6 +48,8 @@ namespace pipeann {
    private:
     void save_del_set();
     void merge(const uint32_t &nthreads, const uint32_t &n_sampled_nbrs);
+    void rebuild_merge(const uint32_t &nthreads, const uint32_t &n_sampled_nbrs);
+    void maybe_trigger_merge();
 
    public:
     size_t _dim;
@@ -77,5 +81,15 @@ namespace pipeann {
     bool _use_mem_index = false;
     double _mem_index_ratio = 1.0;  // mem index size / disk index size
     int search_mode = BEAM_SEARCH;
+
+    bool _use_buffered_updates = false;
+    uint32_t _buffer_search_L = 0;
+    uint32_t _build_ram_gb = 0;
+    size_t _buffer_max_points = 0;
+    size_t _buffer_aligned_dim = 0;
+    std::atomic<size_t> _buffer_live{0};
+    std::atomic<bool> _merge_in_progress{false};
+    pipeann::Parameters _buffer_params;
+    std::unique_ptr<pipeann::Index<T, TagT>> _buffer;
   };
 };  // namespace pipeann

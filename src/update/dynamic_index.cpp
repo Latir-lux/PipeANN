@@ -1,6 +1,7 @@
 #include "neighbor.h"
 #include "utils/timer.h"
 #include "utils/tsl/robin_set.h"
+#include "utils/tsl/robin_map.h"
 #include "utils.h"
 #include "v2/dynamic_index.h"
 #include <csignal>
@@ -14,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <fstream>
 #include <omp.h>
 #include <shared_mutex>
 #include <string>
@@ -32,7 +34,9 @@ namespace pipeann {
   template<typename T, typename TagT>
   DynamicSSDIndex<T, TagT>::DynamicSSDIndex(Parameters &parameters, const std::string disk_prefix_in,
                                             const std::string disk_prefix_out, Distance<T> *dist,
-                                            pipeann::Metric dist_metric, int search_mode, bool use_mem_index) {
+                                            pipeann::Metric dist_metric, int search_mode, bool use_mem_index,
+                                            bool use_buffered_updates, size_t buffer_max_points,
+                                            uint32_t buffer_search_L, uint32_t build_ram_gb) {
     // check if file exists.
     if (!std::filesystem::exists(disk_prefix_in + "_disk.index")) {
       LOG(ERROR) << "Disk index file does not exist: " << disk_prefix_in << "_disk.index";
@@ -75,6 +79,7 @@ namespace pipeann {
       exit(-1);
     }
     bool use_page_search = (search_mode == PAGE_SEARCH);
+    _use_page_search = use_page_search;
     int res = _disk_index->load(_disk_index_prefix_in.c_str(), _num_threads, true, use_page_search);
     if (res != 0) {
       LOG(INFO) << "Failed to load disk index in DynamicSSDIndex constructor";
@@ -86,6 +91,31 @@ namespace pipeann {
       std::string mem_index_path = disk_prefix_in + "_mem.index";  // use the original one.
       LOG(INFO) << "Use static in-memory index for acceleration, path: " << mem_index_path;
       _disk_index->load_mem_index(this->_dist_metric, _disk_index->data_dim, mem_index_path);
+    }
+
+    _dim = _disk_index->data_dim;
+    _use_buffered_updates = use_buffered_updates;
+    if (_use_buffered_updates) {
+      _buffer_params = parameters;
+      _buffer_aligned_dim = ROUND_UP(_dim, 8);
+      _build_ram_gb = build_ram_gb > 0 ? build_ram_gb : 32;
+
+      if (buffer_max_points > 0) {
+        _buffer_max_points = buffer_max_points;
+      } else {
+        size_t base_points = _disk_index->num_points;
+        size_t default_points = std::max<size_t>(100000, base_points / 100);
+        _buffer_max_points = std::min<size_t>(default_points, 5000000);
+      }
+
+      if (buffer_search_L > 0) {
+        _buffer_search_L = buffer_search_L;
+      } else {
+        _buffer_search_L = std::max<uint32_t>(_buffer_params.R + 16, _buffer_params.L);
+      }
+
+      _buffer.reset(new pipeann::Index<T, TagT>(_dist_metric, _dim, _buffer_max_points, true, false, true));
+      _buffer->enable_delete();
     }
   }
 
@@ -119,10 +149,27 @@ namespace pipeann {
 
   template<typename T, typename TagT>
   int DynamicSSDIndex<T, TagT>::insert(const T *point, const TagT &tag) {
-    std::shared_lock<std::shared_timed_mutex> lock(_merge_lock);  // prevent merge during insert
-    journal->append(v2::TxType::kInsert, tag);
-    auto *deletion_set = &deletion_sets[active_delete_set];
-    return _disk_index->insert_in_place(point, tag, deletion_set);
+    if (!_use_buffered_updates) {
+      std::shared_lock<std::shared_timed_mutex> lock(_merge_lock);  // prevent merge during insert
+      journal->append(v2::TxType::kInsert, tag);
+      auto *deletion_set = &deletion_sets[active_delete_set];
+      return _disk_index->insert_in_place(point, tag, deletion_set);
+    }
+
+    int ret = -1;
+    {
+      std::shared_lock<std::shared_timed_mutex> lock(_merge_lock);
+      journal->append(v2::TxType::kInsert, tag);
+      ret = _buffer->insert_point(point, _buffer_params, tag);
+      if (ret == 0) {
+        _buffer_live.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+
+    if (_buffer_max_points > 0 && _buffer_live.load(std::memory_order_relaxed) >= _buffer_max_points) {
+      maybe_trigger_merge();
+    }
+    return ret;
   }
 
   template<typename T, typename TagT>
@@ -132,39 +179,107 @@ namespace pipeann {
     // Acquire shared lock on _merge_lock to prevent starvation of merge operations
     // Without this, continuous search operations could starve the merge_lock.lock() in merge_deletes
     std::shared_lock<std::shared_timed_mutex> merge_lk(_merge_lock);
-    
-    std::vector<TagT> result_tags(4096);
-    std::vector<float> result_distances(4096);
-    auto *deletion_set = &deletion_sets[active_delete_set];
-    size_t n = 0;
-    if (search_mode == BEAM_SEARCH) {
-      n = _disk_index->beam_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-                                   beam_width, stats, deletion_set, dyn_search_l);
-    } else if (search_mode == PAGE_SEARCH) {
-      n = _disk_index->page_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-                                   beam_width, stats);
-    } else if (search_mode == PIPE_SEARCH) {
-      n = _disk_index->pipe_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
-                                   beam_width, stats);
-    }
-    std::vector<NeighborTag<TagT>> best_vec;
-    for (size_t i = 0; i < n; i++) {
-      best_vec.emplace_back(result_tags[i], result_distances[i]);
-    }
-    std::shared_lock<std::shared_timed_mutex> lock(delete_lock);
-    size_t pos = 0;
 
-    for (auto iter : best_vec) {
-      if (deletion_set->find(iter.tag) == deletion_set->end()) {
-        tags[pos] = iter.tag;
-        distances[pos] = iter.dist;
-        pos++;
+    if (!_use_buffered_updates) {
+      std::vector<TagT> result_tags(4096);
+      std::vector<float> result_distances(4096);
+      auto *deletion_set = &deletion_sets[active_delete_set];
+      size_t n = 0;
+      if (search_mode == BEAM_SEARCH) {
+        n = _disk_index->beam_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+                                     beam_width, stats, deletion_set, dyn_search_l);
+      } else if (search_mode == PAGE_SEARCH) {
+        n = _disk_index->page_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+                                     beam_width, stats);
+      } else if (search_mode == PIPE_SEARCH) {
+        n = _disk_index->pipe_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
+                                     beam_width, stats);
       }
-      if (pos == K) {
-        return;
+      std::vector<NeighborTag<TagT>> best_vec;
+      best_vec.reserve(n);
+      for (size_t i = 0; i < n; i++) {
+        best_vec.emplace_back(result_tags[i], result_distances[i]);
+      }
+      std::shared_lock<std::shared_timed_mutex> lock(delete_lock);
+      size_t pos = 0;
+
+      for (auto iter : best_vec) {
+        if (deletion_set->find(iter.tag) == deletion_set->end()) {
+          tags[pos] = iter.tag;
+          distances[pos] = iter.dist;
+          pos++;
+        }
+        if (pos == K) {
+          return;
+        }
+      }
+      return;
+    }
+
+    std::vector<TagT> base_tags(4096);
+    std::vector<float> base_dists(4096);
+    auto *deletion_set = &deletion_sets[active_delete_set];
+    size_t base_n = 0;
+    if (search_mode == BEAM_SEARCH) {
+      base_n = _disk_index->beam_search(query, search_L, mem_L, search_L, base_tags.data(), base_dists.data(),
+                                        beam_width, stats, deletion_set, dyn_search_l);
+    } else if (search_mode == PAGE_SEARCH) {
+      base_n = _disk_index->page_search(query, search_L, mem_L, search_L, base_tags.data(), base_dists.data(),
+                                        beam_width, stats);
+    } else if (search_mode == PIPE_SEARCH) {
+      base_n = _disk_index->pipe_search(query, search_L, mem_L, search_L, base_tags.data(), base_dists.data(),
+                                        beam_width, stats);
+    }
+
+    std::vector<TagT> buffer_tags;
+    std::vector<float> buffer_dists;
+    size_t buffer_n = 0;
+    if (_buffer_live.load(std::memory_order_relaxed) > 0) {
+      buffer_tags.resize(K);
+      buffer_dists.resize(K);
+      buffer_n = _buffer->search_with_tags(query, K, _buffer_search_L, buffer_tags.data(), buffer_dists.data());
+    }
+
+    tsl::robin_map<TagT, float> best_map;
+    best_map.reserve(base_n + buffer_n);
+
+    auto update_best = [&](TagT tag, float dist) {
+      auto it = best_map.find(tag);
+      if (it == best_map.end() || dist < it->second) {
+        best_map.insert_or_assign(tag, dist);
+      }
+    };
+
+    {
+      std::shared_lock<std::shared_timed_mutex> lock(delete_lock);
+      for (size_t i = 0; i < base_n; i++) {
+        TagT tag = base_tags[i];
+        if (deletion_set->find(tag) == deletion_set->end()) {
+          update_best(tag, base_dists[i]);
+        }
+      }
+      for (size_t i = 0; i < buffer_n; i++) {
+        TagT tag = buffer_tags[i];
+        if (deletion_set->find(tag) == deletion_set->end()) {
+          update_best(tag, buffer_dists[i]);
+        }
       }
     }
-    // LOG(INFO) << "Failed to find enough tags after " << i + 1 << " attempts";
+
+    std::vector<NeighborTag<TagT>> merged;
+    merged.reserve(best_map.size());
+    for (const auto &kv : best_map) {
+      merged.emplace_back(kv.first, kv.second);
+    }
+
+    size_t out_n = std::min<size_t>(K, merged.size());
+    if (out_n > 0) {
+      std::partial_sort(merged.begin(), merged.begin() + out_n, merged.end());
+    }
+    for (size_t i = 0; i < out_n; i++) {
+      tags[i] = merged[i].tag;
+      distances[i] = merged[i].dist;
+    }
   }
 
   template<typename T, typename TagT>
@@ -179,6 +294,10 @@ namespace pipeann {
     if (deletion_sets[active_delete_set].find(tag) == deletion_sets[active_delete_set].end()) {
       deletion_sets[active_delete_set].insert(tag);
       deleted_tags[active_delete_set].push_back(tag);
+    }
+
+    if (_use_buffered_updates && _buffer != nullptr) {
+      _buffer->lazy_delete(tag);
     }
   }
 
@@ -200,24 +319,133 @@ namespace pipeann {
 
   template<typename T, typename TagT>
   void DynamicSSDIndex<T, TagT>::final_merge(const uint32_t &nthreads, const uint32_t &n_sampled_nbrs) {
+    _merge_in_progress.store(true, std::memory_order_relaxed);
     std::unique_lock<std::shared_timed_mutex> lock(_merge_lock);  // only one merge at a time
     // _disk_index_in -> _disk_index_out
     save_del_set();
     pipeann::Timer timer;
-    merge(nthreads, n_sampled_nbrs);
 
-    // TODO(gh): do we really need to reload disk index?
-    std::swap(_disk_index_prefix_in, _disk_index_prefix_out);
-    // reload the disk index
-    _disk_index->reload(_disk_index_prefix_in.c_str(), _num_threads);
+    if (_use_buffered_updates && _buffer != nullptr && _buffer_live.load(std::memory_order_relaxed) > 0) {
+      rebuild_merge(nthreads, n_sampled_nbrs);
+    } else {
+      merge(nthreads, n_sampled_nbrs);
+      std::swap(_disk_index_prefix_in, _disk_index_prefix_out);
+      _disk_index->reload(_disk_index_prefix_in.c_str(), _num_threads);
+    }
+
     LOG(INFO) << "Merge time : " << timer.elapsed() / 1000 << " ms";
     MallocExtension::instance()->ReleaseFreeMemory();  // Return free list to OS.
+    _merge_in_progress.store(false, std::memory_order_relaxed);
   }
 
   template<typename T, typename TagT>
   void DynamicSSDIndex<T, TagT>::merge(const uint32_t &nthreads, const uint32_t &n_sampled_nbrs) {
     _disk_index->merge_deletes(_disk_index_prefix_in, _disk_index_prefix_out, deleted_tags[1 - active_delete_set],
                                deletion_sets[1 - active_delete_set], nthreads, n_sampled_nbrs);
+  }
+
+  namespace {
+    inline void update_bin_header(const std::string &path, int npts, int dim) {
+      std::fstream io(path, std::ios::in | std::ios::out | std::ios::binary);
+      io.write(reinterpret_cast<const char *>(&npts), sizeof(int));
+      io.write(reinterpret_cast<const char *>(&dim), sizeof(int));
+      io.close();
+    }
+  }  // namespace
+
+  template<typename T, typename TagT>
+  void DynamicSSDIndex<T, TagT>::rebuild_merge(const uint32_t &nthreads, const uint32_t &n_sampled_nbrs) {
+    (void) n_sampled_nbrs;
+    const auto &deleted_set = deletion_sets[1 - active_delete_set];
+
+    std::string tmp_prefix = _disk_index_prefix_out + "_fresh";
+    std::string tmp_data = tmp_prefix + ".bin";
+    std::string tmp_tags = tmp_prefix + ".tags.bin";
+
+    if (std::filesystem::exists(tmp_data)) {
+      std::filesystem::remove(tmp_data);
+    }
+    if (std::filesystem::exists(tmp_tags)) {
+      std::filesystem::remove(tmp_tags);
+    }
+
+    _disk_index->export_live_points(tmp_data, tmp_tags, deleted_set, nthreads);
+
+    size_t total_points = 0;
+    size_t base_points = 0;
+    size_t base_dim = 0;
+    pipeann::get_bin_metadata(tmp_data, base_points, base_dim);
+    total_points = base_points;
+
+    if (_buffer != nullptr) {
+      std::ofstream data_writer(tmp_data, std::ios::binary | std::ios::app);
+      std::ofstream tags_writer(tmp_tags, std::ios::binary | std::ios::app);
+
+      tsl::robin_set<TagT> active_tags;
+      _buffer->get_active_tags(active_tags);
+      std::vector<T> buf_vec(_buffer_aligned_dim);
+      for (auto tag : active_tags) {
+        if (deleted_set.find(tag) != deleted_set.end()) {
+          continue;
+        }
+        if (_buffer->get_vector_by_tag(tag, buf_vec.data()) != 0) {
+          continue;
+        }
+        data_writer.write(reinterpret_cast<const char *>(buf_vec.data()), _dim * sizeof(T));
+        tags_writer.write(reinterpret_cast<const char *>(&tag), sizeof(TagT));
+        total_points++;
+      }
+      data_writer.close();
+      tags_writer.close();
+    }
+
+    update_bin_header(tmp_data, static_cast<int>(total_points), static_cast<int>(_dim));
+    update_bin_header(tmp_tags, static_cast<int>(total_points), 1);
+
+    pipeann::Metric build_metric = _dist_metric;
+    if (_disk_index->is_data_normalized()) {
+      build_metric = pipeann::Metric::L2;
+    }
+
+    uint32_t bytes_per_nbr = 32;
+    std::string pq_file = _disk_index_prefix_in + "_pq_compressed.bin";
+    if (std::filesystem::exists(pq_file)) {
+      size_t pq_npts = 0;
+      size_t pq_dim = 0;
+      pipeann::get_bin_metadata(pq_file, pq_npts, pq_dim);
+      if (pq_dim > 0) {
+        bytes_per_nbr = static_cast<uint32_t>(pq_dim);
+      }
+    }
+
+    pipeann::build_disk_index<T, TagT>(tmp_data.c_str(), _disk_index_prefix_out.c_str(), _paras_disk.R, _paras_disk.L,
+                                       _build_ram_gb, _num_threads, bytes_per_nbr, build_metric, tmp_tags.c_str(),
+                                       _disk_index->nbr_handler);
+
+    std::swap(_disk_index_prefix_in, _disk_index_prefix_out);
+    _disk_index->load(_disk_index_prefix_in.c_str(), _num_threads, true, _use_page_search);
+
+    if (_buffer != nullptr) {
+      _buffer->clear_index();
+      _buffer->enable_delete();
+    }
+    _buffer_live.store(0, std::memory_order_relaxed);
+
+    if (std::filesystem::exists(tmp_data)) {
+      std::filesystem::remove(tmp_data);
+    }
+    if (std::filesystem::exists(tmp_tags)) {
+      std::filesystem::remove(tmp_tags);
+    }
+  }
+
+  template<typename T, typename TagT>
+  void DynamicSSDIndex<T, TagT>::maybe_trigger_merge() {
+    bool expected = false;
+    if (!_merge_in_progress.compare_exchange_strong(expected, true)) {
+      return;
+    }
+    final_merge(_num_threads);
   }
 
   template class DynamicSSDIndex<float>;

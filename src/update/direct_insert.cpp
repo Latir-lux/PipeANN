@@ -289,6 +289,10 @@ namespace pipeann {
       bg_tasks.push_notify_all();
     } else {
       v2::unlockReqs(this->page_lock_table, pages_locked);
+      // Fix: Free update_buf and return query buffer when page_ref is empty
+      aligned_free(read_data->update_buf);
+      read_data->update_buf = nullptr;
+      this->push_query_buf(read_data);
     }
     reader->deref(&page_ref, ctx);
 #else

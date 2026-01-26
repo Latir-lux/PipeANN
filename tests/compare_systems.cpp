@@ -586,8 +586,15 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
         }
       }
       uint64_t idx = insert_count.fetch_add(1);
-      if (idx >= insert_num)
+      if (idx >= insert_num) {
+        // All inserts completed, log and exit
+        if (idx == insert_num) {
+          double elapsed_final = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+          std::cout << "[Exp3] All " << insert_num << " updates completed in " << elapsed_final 
+                    << "s (target duration: " << duration_sec << "s)" << std::endl;
+        }
         break;
+      }
 
       TagT tag = static_cast<TagT>(idx + 2000000);
       index.insert(insert_data + idx * data_dim, tag);
@@ -668,6 +675,13 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
   for (auto &t : insert_threads) {
     t.join();
   }
+  
+  // All insert threads completed - stop the test immediately
+  double final_elapsed = timer.elapsed() / 1e6;
+  uint64_t final_insert_count = insert_count.load();
+  std::cout << "[Exp3] Insert threads completed. Total inserts: " << final_insert_count 
+            << "/" << insert_num << ", elapsed: " << final_elapsed << "s" << std::endl;
+  
   stop_test.store(true);
 
   for (auto &t : search_threads) {
@@ -750,6 +764,12 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
       }
       uint64_t idx = insert_count.fetch_add(1);
       if (idx >= insert_num) {
+        // All inserts completed, log and exit
+        if (idx == insert_num) {
+          double elapsed_final = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+          std::cout << "[Exp1] All " << insert_num << " updates completed in " << elapsed_final 
+                    << "s (target duration: " << duration_sec << "s)" << std::endl;
+        }
         break;
       }
 
@@ -841,7 +861,15 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
   for (auto &t : insert_threads) {
     t.join();
   }
+  
+  // All insert threads completed - stop the test immediately
+  double final_elapsed = timer.elapsed() / 1e6;
+  uint64_t final_insert_count = insert_count.load();
+  std::cout << "[Exp1] Insert threads completed. Total inserts: " << final_insert_count 
+            << "/" << insert_num << ", elapsed: " << final_elapsed << "s" << std::endl;
+  
   stop_test.store(true);
+  
   for (auto &t : search_threads) {
     t.join();
   }

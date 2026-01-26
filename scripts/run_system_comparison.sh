@@ -499,6 +499,8 @@ PY
 
 # 准备实验1的数据分片（按比例拆分）
 # 同时生成对应的GT子集文件，解决recall计算不准确的问题
+# 默认强制重建GT子集，避免复用错误范围
+FORCE_REGEN_GT_SUBSET=${FORCE_REGEN_GT_SUBSET:-"1"}
 prepare_exp1_data() {
   local data_file=$1
   local data_type=$2
@@ -524,10 +526,10 @@ PY
   local base_file="${data_prefix}_exp1_base${base_pct}.${data_ext}"
   local update_file="${data_prefix}_exp1_update${update_pct}.${data_ext}"
 
-  # GT子集文件路径
+  # GT子集文件路径（基于实际参与搜索的点范围）
   local gt_ext="${GT_FILE##*.}"
   local gt_prefix="${GT_FILE%.*}"
-  local gt_subset_file="${gt_prefix}_exp1_base${base_pct}.${gt_ext}"
+  local gt_subset_file="${gt_prefix}_exp1_base${base_pct}_update${update_pct}.${gt_ext}"
 
   if [ -f "${base_file}" ] && [ -f "${update_file}" ]; then
     echo "Using existing exp1 data splits: ${base_file}, ${update_file}" >&2
@@ -590,7 +592,7 @@ PY
     EXP1_UPDATE_FILE=${update_file}
   fi
 
-  # 获取基础数据集点数，用于生成GT子集
+  # 获取基础/更新数据集点数，用于生成GT子集
   local base_pts_count
   base_pts_count=$(python3 - <<PY
 import struct
@@ -599,15 +601,29 @@ with open("${EXP1_BASE_FILE}", "rb") as f:
     print(npts)
 PY
 )
+  local update_pts_count
+  update_pts_count=$(python3 - <<PY
+import struct
+with open("${EXP1_UPDATE_FILE}", "rb") as f:
+    npts, dim = struct.unpack("<ii", f.read(8))
+    print(npts)
+PY
+)
+  local total_pts_count=$((base_pts_count + update_pts_count))
 
-  # 生成GT子集文件（只保留ID在[0, base_pts_count)范围内的最近邻）
+  # 生成GT子集文件（只保留ID在[0, total_pts_count)范围内的最近邻）
+  if [ "${FORCE_REGEN_GT_SUBSET}" = "1" ] && [ -f "${gt_subset_file}" ]; then
+    echo "Removing existing GT subset to force regeneration: ${gt_subset_file}" >&2
+    rm -f "${gt_subset_file}"
+  fi
+
   if [ -f "${gt_subset_file}" ]; then
     echo "Using existing GT subset: ${gt_subset_file}" >&2
   else
-    echo "Generating GT subset for base ${base_pct}% (${base_pts_count} points)..." >&2
+    echo "Generating GT subset for base+update ${base_pct}%+${update_pct}% (${total_pts_count} points)..." >&2
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    python3 "${script_dir}/generate_subset_gt.py" "${GT_FILE}" "${gt_subset_file}" "${base_pts_count}" -v >&2
+    python3 "${script_dir}/generate_subset_gt.py" "${GT_FILE}" "${gt_subset_file}" "${total_pts_count}" -v >&2
     if [ $? -ne 0 ]; then
       echo "Warning: Failed to generate GT subset, using original GT file" >&2
       gt_subset_file="${GT_FILE}"

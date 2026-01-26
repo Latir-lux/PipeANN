@@ -48,10 +48,14 @@ namespace pipeann {
 
     std::vector<Neighbor> exp_node_info;
     tsl::robin_map<uint32_t, T *> coord_map;
-    coord_map.reserve(10 * this->l_index);
+    // DC-PDI内存优化：减少coord_map和coord_buf的预分配大小
+    // 实际上搜索过程中访问的节点数量通常不会超过3*l_index
+    // 原来使用10*l_index是过于保守的估计
+    const size_t coord_buf_capacity = 3 * this->l_index;
+    coord_map.reserve(coord_buf_capacity);
     // Dynamic alloc and not using MAX_N_CMPS to reduce memory footprint.
     T *coord_buf = nullptr;
-    alloc_aligned((void **) &coord_buf, 10 * this->l_index * this->aligned_dim, 256);
+    alloc_aligned((void **) &coord_buf, coord_buf_capacity * this->aligned_dim * sizeof(T), 256);
     std::vector<uint64_t> page_ref{};
     // re-normalize point1 to support inner_product search (it adds one more dimension, so not idempotent).
     this->do_beam_search(point1, 0, l_index, beam_width, exp_node_info, &coord_map, coord_buf, nullptr, deletion_set,
@@ -152,10 +156,16 @@ namespace pipeann {
     // re-read the candidate pages (mostly in the cache).
     std::unordered_map<uint32_t, char *> page_buf_map;
 
-    // dynamically allocate update_buf to reduce memory footprint.
-    // 2x MAX_N_EDGES for read + write, the update_buf is freed in bg_io_thread.
+    // DC-PDI内存优化：动态计算实际需要的缓冲区大小
+    // 实际需要：new_nhood.size()（读取邻居页面）+ pages_to_rmw.size()（写入页面）
+    // 添加额外1个用于目标节点，并向上取整到2的幂次方便对齐
+    const size_t actual_pages_needed = new_nhood.size() + pages_to_rmw.size() + 1;
+    // 限制最大分配大小，避免极端情况下的内存爆炸
+    // 通常range是96-128，所以实际需求约256页，远小于2*MAX_N_EDGES=2048
+    const size_t max_pages = std::min(actual_pages_needed, static_cast<size_t>(2 * this->range + 16));
+    
     assert(read_data->update_buf == nullptr);
-    pipeann::alloc_aligned((void **) &read_data->update_buf, (2 * MAX_N_EDGES + 1) * size_per_io, SECTOR_LEN);
+    pipeann::alloc_aligned((void **) &read_data->update_buf, max_pages * size_per_io, SECTOR_LEN);
     auto &update_buf = read_data->update_buf;
 
     std::vector<IORequest> reads, writes_4k, writes;

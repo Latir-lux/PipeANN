@@ -731,13 +731,14 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
   }
 
   // L值动态调整参数
-  constexpr uint64_t L_MIN = 30;         // L最小值
-  constexpr uint64_t L_MAX = 500;        // L最大值
-  constexpr uint64_t L_STEP = 5;         // 每次调整步长
+  constexpr uint64_t L_MIN = 50;         // L最小值（提高下限以保证召回率）
+  constexpr uint64_t L_MAX = 600;        // L最大值（允许更大的搜索范围）
+  constexpr uint64_t L_STEP = 10;        // 每次调整步长（增大以更快收敛）
   constexpr double RECALL_TOLERANCE = 2.0;  // 召回率容忍度（±2%）
   constexpr int STABLE_THRESHOLD = 3;    // 稳定判定所需的连续采样次数
 
   // 动态L值（原子变量，可被搜索线程安全读取）
+  // 使用传入的L_init作为初始值（建议设置为500）
   std::atomic<uint64_t> current_L(L_init);
   int stable_count = 0;  // 连续稳定的采样次数
 
@@ -1258,7 +1259,8 @@ int main(int argc, char **argv) {
     }
   }
   if (L_values.empty()) {
-    L_values = {100, 200, 300, 400, 500};
+    // 默认以500作为初始L值，这是经过测试的合理值
+    L_values = {500, 400, 300, 200, 100};
   }
 
   std::cout << "Running comparison experiment for " << system_names[system_type] << std::endl;

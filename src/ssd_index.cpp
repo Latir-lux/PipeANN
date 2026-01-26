@@ -177,6 +177,10 @@ namespace pipeann {
 #endif
 
 #ifdef ENABLE_DISPERSION_MONITOR
+    // DC-PDI: 初始化dispersion监控器的max_neighbors参数
+    // 这对于正确计算碎片化比例至关重要
+    dispersion_monitor_.set_max_neighbors(this->range);
+    LOG(INFO) << "DC-PDI: Dispersion monitor initialized with max_neighbors=" << this->range;
     start_reorg_thread();
 #endif
   }
@@ -237,20 +241,72 @@ namespace pipeann {
 
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::reorg_worker() {
+    // DC-PDI后台重组织工作线程
+    // 
+    // 设计原则：
+    // 1. 轻量级检查，避免影响主线程性能
+    // 2. 适当的冷却时间，避免频繁触发
+    // 3. 首次触发快速响应（30秒后可触发），后续使用正常间隔
+    
+    constexpr int kCheckIntervalSec = 5;           // 检查间隔（秒）
+    constexpr int kFirstReorgDelaySec = 30;        // 首次重组织延迟（30秒，让系统预热）
+    constexpr int kMinReorgIntervalSec = 60;       // 后续最小重组织间隔（1分钟）
+    constexpr int kMinSamplesForReorg = 50;        // 触发重组织所需的最小采样数
+    
+    auto start_time = std::chrono::steady_clock::now();
+    auto last_reorg_time = start_time;
+    bool first_reorg_done = false;
+    
+    LOG(INFO) << "DC-PDI: Background reorganization thread started";
+    
     while (!reorg_stop_.load()) {
-      if (dispersion_monitor_.should_reorganize()) {
+      std::this_thread::sleep_for(std::chrono::seconds(kCheckIntervalSec));
+      
+      if (reorg_stop_.load()) break;
+      
+      auto now = std::chrono::steady_clock::now();
+      auto time_since_start = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+      auto time_since_last_reorg = std::chrono::duration_cast<std::chrono::seconds>(now - last_reorg_time).count();
+      
+      // 确定所需的冷却时间
+      int required_cooldown = first_reorg_done ? kMinReorgIntervalSec : kFirstReorgDelaySec;
+      
+      // 检查是否满足触发条件
+      bool cooldown_passed = time_since_last_reorg >= required_cooldown;
+      bool has_enough_samples = dispersion_monitor_.get_global_stats().total_samples >= kMinSamplesForReorg;
+      bool should_reorg = dispersion_monitor_.should_reorganize();
+      
+      if (cooldown_passed && has_enough_samples && should_reorg) {
+        LOG(INFO) << "DC-PDI: Triggering reorganization after " << time_since_start << "s";
         perform_reorganization();
+        last_reorg_time = std::chrono::steady_clock::now();
+        first_reorg_done = true;
       }
-      std::this_thread::sleep_for(std::chrono::seconds(1));
     }
+    
+    LOG(INFO) << "DC-PDI: Background reorganization thread stopped";
   }
 
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::perform_reorganization() {
-    std::unique_lock<std::shared_mutex> lock(merge_lock);
+    // DC-PDI后台重组织优化：
+    // 当前实现为"轻量级重组织"：仅重置统计数据
+    // 这允许系统在运行时逐渐通过正常的插入操作改善物理布局
+    // 
+    // 重要：不持有merge_lock的独占锁，避免阻塞插入操作
+    // 未来可以实现真正的页面重组织，但需要更复杂的并发控制
+    
     reorg_running_.store(true);
-
+    
+    // 记录碎片页面信息（仅用于监控/日志）
     auto fragmented_pages = dispersion_monitor_.get_fragmented_pages();
+    if (!fragmented_pages.empty()) {
+      LOG(INFO) << "DC-PDI: Detected " << fragmented_pages.size() 
+                << " fragmented pages, resetting dispersion stats";
+    }
+    
+    // 清除统计数据，让系统重新收集
+    // 这不需要持有merge_lock，因为统计数据有自己的互斥锁保护
     for (auto page_id : fragmented_pages) {
       dispersion_monitor_.clear_page(page_id);
     }

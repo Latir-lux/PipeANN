@@ -129,6 +129,10 @@ namespace pipeann {
   void DynamicSSDIndex<T, TagT>::search(const T *query, const uint64_t K, const uint32_t mem_L, const uint64_t search_L,
                                         const uint32_t beam_width, TagT *tags, float *distances, QueryStats *stats,
                                         bool dyn_search_l) {
+    // Acquire shared lock on _merge_lock to prevent starvation of merge operations
+    // Without this, continuous search operations could starve the merge_lock.lock() in merge_deletes
+    std::shared_lock<std::shared_timed_mutex> merge_lk(_merge_lock);
+    
     std::vector<TagT> result_tags(4096);
     std::vector<float> result_distances(4096);
     auto *deletion_set = &deletion_sets[active_delete_set];

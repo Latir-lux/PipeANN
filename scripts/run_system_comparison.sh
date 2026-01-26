@@ -3,7 +3,7 @@
 # 运行DC-PDI、IP-DiskANN和FreshDiskANN的对比实验
 #
 # 使用方法:
-#   ./scripts/run_system_comparison.sh [experiment] [dataset] [base_dir] [output_dir] [exp1_base_ratio] [exp1_update_ratio] [exp1_duration_sec] [exp1_target_recall] [exp2_base_ratio] [exp2_update_rate] [exp2_duration_sec] [exp3_base_ratio] [exp3_update_ratio] [exp3_duration_sec] [exp2_update_ratio]
+#   ./scripts/run_system_comparison.sh [experiment] [dataset] [base_dir] [output_dir] [exp1_base_ratio] [exp1_update_ratio] [exp1_duration_sec] [exp1_target_recall] [exp2_base_ratio] [exp2_update_rate] [exp2_duration_sec] [exp3_base_ratio] [exp3_update_ratio] [exp3_duration_sec] [exp2_update_ratio] [systems]
 #
 # 参数:
 #   experiment: 1/2/3/all (默认: all)
@@ -18,6 +18,8 @@
 #   exp2_update_rate: 实验2更新速率(向量/秒, 0=不限制) (默认: 0)
 #   exp2_duration_sec: 实验2持续时间(秒, 0=全量更新) (默认: 0)
 #   exp2_update_ratio: 实验2更新集占比(在剩余更新集中取比例, 默认: 1.0)
+#   systems: 要测试的系统 (dc-pdi/ip-diskann/fresh-diskann/all, 逗号分隔, 默认: all)
+#            例如: "dc-pdi,fresh-diskann" 只测试这两个系统
 
 set -e
 
@@ -37,6 +39,7 @@ EXP3_BASE_RATIO=${12:-"0.5"}
 EXP3_UPDATE_RATIO=${13:-"0.5"}
 EXP3_DURATION_SEC=${14:-"120"}
 EXP2_UPDATE_RATIO=${15:-${EXP2_UPDATE_RATIO:-"1.0"}}
+SYSTEMS_TO_TEST=${16:-"all"}
 NUM_THREADS=32
 RECALL_AT=10
 
@@ -110,6 +113,7 @@ echo "Build RAM budget (GB): ${BUILD_RAM_GB}"
 echo "Exp3 base ratio: $EXP3_BASE_RATIO"
 echo "Exp3 update ratio: $EXP3_UPDATE_RATIO"
 echo "Exp3 duration sec: $EXP3_DURATION_SEC"
+echo "Systems to test: $SYSTEMS_TO_TEST"
 echo "============================================"
 
 if [ ! -f "${INSERT_FILE}" ]; then
@@ -121,6 +125,22 @@ fi
 L_VALUES="50 55 60 65 70 75 80 85 90 95 100 105 110 115 120 125 130 135 140 145 150 155 160 165 170 175 180 185 190 195 200 205 210 215 220 225 230 235 240 245 250 255 260 265 270 275 280 285 290 295 300 305 310 315 320 325 330 335 340 345 350 355 360 365 370 375 380 385 390 395 400 405 410 415 420 425 430 435 440 445 450 455 460 465 470 475 480 485 490 495 500"
 
 # ============= 函数定义 =============
+
+# 判断是否应该测试某个系统
+should_test_system() {
+  local system=$1
+  if [ "${SYSTEMS_TO_TEST}" = "all" ]; then
+    return 0
+  fi
+  # 将逗号分隔的系统列表转换为数组并检查
+  IFS=',' read -ra SYSTEMS_ARRAY <<< "${SYSTEMS_TO_TEST}"
+  for s in "${SYSTEMS_ARRAY[@]}"; do
+    if [ "${s}" = "${system}" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 # 软链接/复制辅助函数（优先硬链接，失败则复制）
 link_or_copy() {
@@ -698,9 +718,15 @@ fi
 if should_run "1"; then
   echo ""
   echo ">>> 开始实验1: 搜索延迟分布测试 <<<"
-  run_search_latency_exp 0 "dc-pdi"
-  run_search_latency_exp 1 "ip-diskann"
-  run_search_latency_exp 2 "fresh-diskann"
+  if should_test_system "dc-pdi"; then
+    run_search_latency_exp 0 "dc-pdi"
+  fi
+  if should_test_system "ip-diskann"; then
+    run_search_latency_exp 1 "ip-diskann"
+  fi
+  if should_test_system "fresh-diskann"; then
+    run_search_latency_exp 2 "fresh-diskann"
+  fi
 fi
 
 # 实验2: 更新吞吐量
@@ -723,9 +749,15 @@ if should_run "2"; then
     fi
   fi
 
-  run_update_throughput_exp 0 "dc-pdi" ${EXP2_UPDATE_FILE} ${EXP2_INDEX_BASE}
-  run_update_throughput_exp 1 "ip-diskann" ${EXP2_UPDATE_FILE} ${EXP2_INDEX_BASE}
-  run_update_throughput_exp 2 "fresh-diskann" ${EXP2_UPDATE_FILE} ${EXP2_INDEX_BASE}
+  if should_test_system "dc-pdi"; then
+    run_update_throughput_exp 0 "dc-pdi" ${EXP2_UPDATE_FILE} ${EXP2_INDEX_BASE}
+  fi
+  if should_test_system "ip-diskann"; then
+    run_update_throughput_exp 1 "ip-diskann" ${EXP2_UPDATE_FILE} ${EXP2_INDEX_BASE}
+  fi
+  if should_test_system "fresh-diskann"; then
+    run_update_throughput_exp 2 "fresh-diskann" ${EXP2_UPDATE_FILE} ${EXP2_INDEX_BASE}
+  fi
 fi
 
 # 实验3: 读写并发性能
@@ -748,9 +780,15 @@ if should_run "3"; then
     fi
   fi
 
-  run_concurrent_exp 0 "dc-pdi" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
-  run_concurrent_exp 1 "ip-diskann" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
-  run_concurrent_exp 2 "fresh-diskann" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
+  if should_test_system "dc-pdi"; then
+    run_concurrent_exp 0 "dc-pdi" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
+  fi
+  if should_test_system "ip-diskann"; then
+    run_concurrent_exp 1 "ip-diskann" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
+  fi
+  if should_test_system "fresh-diskann"; then
+    run_concurrent_exp 2 "fresh-diskann" ${EXP3_DURATION_SEC} ${EXP3_INDEX_BASE} ${EXP3_UPDATE_FILE}
+  fi
 fi
 
 # ============= 完成 =============

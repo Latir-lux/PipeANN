@@ -619,6 +619,13 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
         }
       }
     }
+    
+    // For FreshDiskANN, wait for any ongoing reorganization to complete before exiting
+    if (system_type == FRESH_DISKANN) {
+      while (index.is_reorganizing()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+    }
   };
 
   // 启动线程
@@ -676,7 +683,15 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
     t.join();
   }
   
-  // All insert threads completed - stop the test immediately
+  // All insert threads completed - wait for any final operations to complete
+  if (system_type == FRESH_DISKANN) {
+    std::cout << "[Exp3] Waiting for FreshDiskANN reorganization to complete..." << std::endl;
+    while (index.is_reorganizing()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    std::cout << "[Exp3] FreshDiskANN reorganization completed." << std::endl;
+  }
+  
   double final_elapsed = timer.elapsed() / 1e6;
   uint64_t final_insert_count = insert_count.load();
   std::cout << "[Exp3] Insert threads completed. Total inserts: " << final_insert_count 
@@ -795,6 +810,13 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
         }
       }
     }
+    
+    // For FreshDiskANN, wait for any ongoing reorganization to complete before exiting
+    if (system_type == FRESH_DISKANN) {
+      while (index.is_reorganizing()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+    }
   };
 
   std::vector<std::thread> search_threads;
@@ -862,12 +884,21 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
     t.join();
   }
   
-  // All insert threads completed - stop the test immediately
+  // All insert threads completed - wait a bit for any final operations to complete
+  if (system_type == FRESH_DISKANN) {
+    std::cout << "[Exp1] Waiting for FreshDiskANN reorganization to complete..." << std::endl;
+    while (index.is_reorganizing()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    std::cout << "[Exp1] FreshDiskANN reorganization completed." << std::endl;
+  }
+  
   double final_elapsed = timer.elapsed() / 1e6;
   uint64_t final_insert_count = insert_count.load();
   std::cout << "[Exp1] Insert threads completed. Total inserts: " << final_insert_count 
             << "/" << insert_num << ", elapsed: " << final_elapsed << "s" << std::endl;
   
+  // Now it's safe to stop the test
   stop_test.store(true);
   
   for (auto &t : search_threads) {

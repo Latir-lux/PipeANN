@@ -187,6 +187,36 @@ ensure_index_dir() {
   mkdir -p "${index_dir}"
 }
 
+# Ensure tags exist for FreshDiskANN
+ensure_tags_for_prefix() {
+  local data_file=$1
+  local index_prefix=$2
+  local tag_file="${index_prefix}_disk.index.tags"
+
+  if [ -f "${tag_file}" ]; then
+    return
+  fi
+
+  if [ ! -x "./build/tests/gen_tags" ]; then
+    echo "Error: gen_tags executable not found. Please compile first:" >&2
+    echo "  cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make gen_tags" >&2
+    exit 1
+  fi
+
+  if [ ! -f "${data_file}" ]; then
+    echo "Error: Base data file not found for tag generation: ${data_file}" >&2
+    exit 1
+  fi
+
+  echo "[$(date)] Generating tags for ${index_prefix}..." >&2
+  ./build/tests/gen_tags "${DATA_TYPE}" "${data_file}" "${index_prefix}" >&2
+
+  if [ ! -f "${tag_file}" ]; then
+    echo "Error: Tag generation failed, missing ${tag_file}" >&2
+    exit 1
+  fi
+}
+
 # 清理系统专用索引文件
 cleanup_system_index() {
   local system_index=$1
@@ -219,6 +249,10 @@ prepare_index() {
       exit 1
     fi
   fi
+
+  if [ "${system_name}" = "fresh-diskann" ]; then
+    ensure_tags_for_prefix "${data_file}" "${index_base}"
+  fi
   
   if [ "${read_only}" = "true" ]; then
     echo "[$(date)] Reusing shared index for ${system_name}: ${index_base}" >&2
@@ -239,6 +273,10 @@ prepare_index() {
     link_or_copy ${index_base}_pq_pivots.bin ${system_index}_pq_pivots.bin
     link_or_copy ${index_base}_sample_data.bin ${system_index}_sample_data.bin
     link_or_copy ${index_base}_partition.bin.aligned ${system_index}_partition.bin.aligned
+  fi
+
+  if [ "${system_name}" = "fresh-diskann" ]; then
+    ensure_tags_for_prefix "${data_file}" "${system_index}"
   fi
   
   echo "[$(date)] Index for $system_name ready: ${system_index}" >&2
@@ -294,7 +332,8 @@ run_update_throughput_exp() {
   echo "实验2: 更新吞吐量测试 - ${system_name}"
   echo "========================================"
   
-  local system_index=$(prepare_index ${system_name} ${system_type} ${index_base} false)
+  local base_file=${EXP2_BASE_FILE:-"${DATA_FILE}"}
+  local system_index=$(prepare_index ${system_name} ${system_type} ${index_base} false "${base_file}")
   local output_file="${RESULTS_DIR}/exp2_update_throughput_${system_name}.csv"
   
   echo "[$(date)] Running update throughput test for ${system_name}..."
@@ -747,7 +786,8 @@ run_concurrent_exp() {
   echo "实验3: 读写并发性能测试 - ${system_name}"
   echo "========================================"
   
-  local system_index=$(prepare_index ${system_name} ${system_type} ${index_base} false)
+  local base_file=${EXP3_BASE_FILE:-"${DATA_FILE}"}
+  local system_index=$(prepare_index ${system_name} ${system_type} ${index_base} false "${base_file}")
   local output_file="${RESULTS_DIR}/exp3_concurrent_${system_name}.csv"
   
   echo "[$(date)] Running concurrent test for ${system_name} (${duration_sec}s)..."

@@ -265,9 +265,6 @@ namespace pipeann {
     }
     LOG(INFO) << "Write nhoods finished, totally elapsed " << delete_timer.elapsed() / 1e3 << "ms.";
 
-    // duplicate neighbor handler.
-    auto new_nbr_handler = this->nbr_handler->shuffle(rev_id_map, new_npoints, nthreads);
-
     while (deleted_nodes_set.find(id2tag(medoid)) != deleted_nodes_set.end()) {
       LOG(INFO) << "Medoid deleted. Choosing another start node. Medoid ID: " << medoid << " tag: " << id2tag(medoid);
       std::vector<uint32_t> medoid_nhood;
@@ -285,6 +282,11 @@ namespace pipeann {
 
     // set metadata, PQ and tags.
     merge_lock.lock();  // unlock in reload().
+    
+    // duplicate neighbor handler - must be done AFTER acquiring merge_lock
+    // to prevent concurrent insert operations from accessing pq_table during shuffle
+    auto new_nbr_handler = this->nbr_handler->shuffle(rev_id_map, new_npoints, nthreads);
+    
     // metadata.
     this->num_points = new_npoints;
     uint32_t mapped_medoid = 0;

@@ -498,9 +498,10 @@ PY
 
 
 # 准备实验1的数据分片（按比例拆分）
-# 同时生成对应的GT子集文件，解决recall计算不准确的问题
-# 默认强制重建GT子集，避免复用错误范围
-FORCE_REGEN_GT_SUBSET=${FORCE_REGEN_GT_SUBSET:-"1"}
+# 根据基础索引集生成exp1 groundtruth，确保每个query至少100个GT
+# 默认强制重建exp1 GT，避免复用错误范围
+FORCE_REGEN_EXP1_GT=${FORCE_REGEN_EXP1_GT:-"1"}
+EXP1_GT_K=${EXP1_GT_K:-"100"}
 prepare_exp1_data() {
   local data_file=$1
   local data_type=$2
@@ -526,10 +527,14 @@ PY
   local base_file="${data_prefix}_exp1_base${base_pct}.${data_ext}"
   local update_file="${data_prefix}_exp1_update${update_pct}.${data_ext}"
 
-  # GT子集文件路径（基于实际参与搜索的点范围）
+  # Exp1 GT文件路径（基于base ratio的数据集）
   local gt_ext="${GT_FILE##*.}"
   local gt_prefix="${GT_FILE%.*}"
-  local gt_subset_file="${gt_prefix}_exp1_base${base_pct}_update${update_pct}.${gt_ext}"
+  local exp1_gt_k=${EXP1_GT_K}
+  if [ "${exp1_gt_k}" -lt 100 ]; then
+    exp1_gt_k=100
+  fi
+  local exp1_gt_file="${gt_prefix}_exp1_base${base_pct}_k${exp1_gt_k}.${gt_ext}"
 
   if [ -f "${base_file}" ] && [ -f "${update_file}" ]; then
     echo "Using existing exp1 data splits: ${base_file}, ${update_file}" >&2
@@ -592,7 +597,7 @@ PY
     EXP1_UPDATE_FILE=${update_file}
   fi
 
-  # 获取基础/更新数据集点数，用于生成GT子集
+  # 获取基础/更新数据集点数，用于生成GT
   local base_pts_count
   base_pts_count=$(python3 - <<PY
 import struct
@@ -601,36 +606,32 @@ with open("${EXP1_BASE_FILE}", "rb") as f:
     print(npts)
 PY
 )
-  local update_pts_count
-  update_pts_count=$(python3 - <<PY
-import struct
-with open("${EXP1_UPDATE_FILE}", "rb") as f:
-    npts, dim = struct.unpack("<ii", f.read(8))
-    print(npts)
-PY
-)
-  local total_pts_count=$((base_pts_count + update_pts_count))
-
-  # 生成GT子集文件（只保留ID在[0, total_pts_count)范围内的最近邻）
-  if [ "${FORCE_REGEN_GT_SUBSET}" = "1" ] && [ -f "${gt_subset_file}" ]; then
-    echo "Removing existing GT subset to force regeneration: ${gt_subset_file}" >&2
-    rm -f "${gt_subset_file}"
+  if [ "${base_pts_count}" -lt "${exp1_gt_k}" ]; then
+    echo "Error: base points (${base_pts_count}) less than required GT K (${exp1_gt_k})" >&2
+    exit 1
   fi
 
-  if [ -f "${gt_subset_file}" ]; then
-    echo "Using existing GT subset: ${gt_subset_file}" >&2
+  if [ "${FORCE_REGEN_EXP1_GT}" = "1" ] && [ -f "${exp1_gt_file}" ]; then
+    echo "Removing existing exp1 GT to force regeneration: ${exp1_gt_file}" >&2
+    rm -f "${exp1_gt_file}"
+  fi
+
+  if [ -f "${exp1_gt_file}" ]; then
+    echo "Using existing exp1 GT: ${exp1_gt_file}" >&2
   else
-    echo "Generating GT subset for base+update ${base_pct}%+${update_pct}% (${total_pts_count} points)..." >&2
-    local script_dir
-    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    python3 "${script_dir}/generate_subset_gt.py" "${GT_FILE}" "${gt_subset_file}" "${total_pts_count}" -v >&2
+    echo "Generating exp1 GT for base ${base_pct}% (${base_pts_count} points), K=${exp1_gt_k}..." >&2
+    if [ ! -x "./build/tests/utils/compute_groundtruth" ]; then
+      echo "Error: ./build/tests/utils/compute_groundtruth not found or not executable" >&2
+      exit 1
+    fi
+    ./build/tests/utils/compute_groundtruth "${data_type}" "${EXP1_BASE_FILE}" "${QUERY_FILE}" "${exp1_gt_k}" "${exp1_gt_file}" >&2
     if [ $? -ne 0 ]; then
-      echo "Warning: Failed to generate GT subset, using original GT file" >&2
-      gt_subset_file="${GT_FILE}"
+      echo "Error: Failed to generate exp1 GT" >&2
+      exit 1
     fi
   fi
 
-  EXP1_GT_FILE=${gt_subset_file}
+  EXP1_GT_FILE=${exp1_gt_file}
   echo "Exp1 GT file: ${EXP1_GT_FILE}" >&2
 }
 

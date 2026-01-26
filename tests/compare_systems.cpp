@@ -524,6 +524,16 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
   std::cout << "[" << system_names[system_type] << "] Insert completed: " << num_inserts << " ops in " << total_time
             << "s, throughput=" << final_throughput << " ops/s" << std::endl;
 
+  if (system_type == FRESH_DISKANN && trigger_merge && !merge_done.load()) {
+    uint64_t final_inserts = insert_count.load();
+    if (final_inserts > 0) {
+      std::cout << "[" << system_names[system_type] << "] Forcing final merge at " << final_inserts << " inserts"
+                << std::endl;
+      index.final_merge(NUM_SEARCH_THREADS);
+      merge_done.store(true);
+    }
+  }
+
   ofs.close();
 }
 
@@ -694,6 +704,11 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
 
   // All insert threads completed - wait for any final operations to complete
   if (system_type == FRESH_DISKANN) {
+    uint64_t final_inserts = insert_count.load();
+    if (final_inserts > 0 && (final_inserts % MERGE_INTERVAL) != 0) {
+      std::cout << "[Exp3] Forcing final merge for FreshDiskANN at " << final_inserts << " inserts" << std::endl;
+      index.final_merge(NUM_SEARCH_THREADS / 2);
+    }
     std::cout << "[Exp3] Waiting for FreshDiskANN reorganization to complete..." << std::endl;
     while (index.is_reorganizing()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -964,6 +979,11 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
 
   // All insert threads completed - wait a bit for any final operations to complete
   if (system_type == FRESH_DISKANN) {
+    uint64_t final_inserts = insert_count.load();
+    if (final_inserts > 0 && (final_inserts % MERGE_INTERVAL) != 0) {
+      std::cout << "[Exp1] Forcing final merge for FreshDiskANN at " << final_inserts << " inserts" << std::endl;
+      index.final_merge(NUM_SEARCH_THREADS / 2);
+    }
     std::cout << "[Exp1] Waiting for FreshDiskANN reorganization to complete..." << std::endl;
     while (index.is_reorganizing()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));

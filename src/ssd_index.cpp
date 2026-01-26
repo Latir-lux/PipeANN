@@ -2,6 +2,7 @@
 #include "ssd_index.h"
 #include <malloc.h>
 #include <filesystem>
+#include <cstdlib>
 
 #include <omp.h>
 #include <cmath>
@@ -17,6 +18,15 @@
 // Index<T, TagT>的ssd版本 把大规模ANN索引存储在SSD上 让查询、插入、加载能以优化后的I/O方式进行
 // 加入了缓冲区管理 SSD专用I/O reader/writer 后台异步I/O线程 邻居处理 内存+SSD混合索引(mem_index)
 namespace pipeann {
+#ifdef ENABLE_DISPERSION_MONITOR
+  namespace {
+    bool env_disables_dispersion_monitor() {
+      const char *value = std::getenv("PIPEANN_DISABLE_DISPERSION_MONITOR");
+      return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }
+  }  // namespace
+#endif
+
   template<typename T>
   DiskNode<T>::DiskNode(uint32_t id, T *coords, uint32_t *nhood) : id(id) {
     this->coords = coords;
@@ -35,6 +45,9 @@ namespace pipeann {
   SSDIndex<T, TagT>::SSDIndex(pipeann::Metric m, std::shared_ptr<AlignedFileReader> &fileReader,
                               AbstractNeighbor<T> *nbr_handler, bool tags, Parameters *params)
       : reader(fileReader), nbr_handler(nbr_handler), data_is_normalized(false), enable_tags(tags) {
+#ifdef ENABLE_DISPERSION_MONITOR
+    this->dispersion_monitor_enabled_ = !env_disables_dispersion_monitor();
+#endif
     if (m == pipeann::Metric::COSINE) {
       if (std::is_floating_point<T>::value) {
         LOG(INFO) << "Cosine metric chosen for (normalized) float data."
@@ -177,11 +190,13 @@ namespace pipeann {
 #endif
 
 #ifdef ENABLE_DISPERSION_MONITOR
-    // DC-PDI: 初始化dispersion监控器的max_neighbors参数
-    // 这对于正确计算碎片化比例至关重要
-    dispersion_monitor_.set_max_neighbors(this->range);
-    LOG(INFO) << "DC-PDI: Dispersion monitor initialized with max_neighbors=" << this->range;
-    start_reorg_thread();
+    if (dispersion_monitor_enabled_) {
+      // DC-PDI: 初始化dispersion监控器的max_neighbors参数
+      // 这对于正确计算碎片化比例至关重要
+      dispersion_monitor_.set_max_neighbors(this->range);
+      LOG(INFO) << "DC-PDI: Dispersion monitor initialized with max_neighbors=" << this->range;
+      start_reorg_thread();
+    }
 #endif
   }
 
@@ -189,7 +204,9 @@ namespace pipeann {
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::destroy_buffers() {
 #ifdef ENABLE_DISPERSION_MONITOR
-    stop_reorg_thread();
+    if (dispersion_monitor_enabled_) {
+      stop_reorg_thread();
+    }
 #endif
 #ifndef READ_ONLY_TESTS
     for (int i = 0; i < kBgIOThreads; ++i) {

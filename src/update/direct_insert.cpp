@@ -25,11 +25,27 @@
 #include <sys/syscall.h>
 #include "linux_aligned_file_reader.h"
 
+#ifdef ENABLE_DISPERSION_MONITOR
+#include <cstdlib>
+#endif
+
 #ifdef ENABLE_BLOCK_AWARE_PRUNE
 #include "utils/clustering.h"
 #endif
 
 namespace pipeann {
+#ifdef ENABLE_DISPERSION_MONITOR
+  namespace {
+    bool env_disables_dispersion_monitor() {
+      static const bool disabled = []() {
+        const char *value = std::getenv("PIPEANN_DISABLE_DISPERSION_MONITOR");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+      }();
+      return disabled;
+    }
+  }  // namespace
+#endif
+
   template<typename T, typename TagT>
   int SSDIndex<T, TagT>::insert_in_place(const T *point1, const TagT &tag, tsl::robin_set<uint32_t> *deletion_set) {
     std::shared_lock lk(merge_lock);
@@ -75,14 +91,14 @@ namespace pipeann {
       const size_t max_to_consider = std::min(exp_node_info.size(), static_cast<size_t>(16));
       std::unordered_map<uint64_t, float> page_strength;
       page_strength.reserve(max_to_consider);
-      
+
       for (size_t i = 0; i < max_to_consider; i++) {
         auto &nbr = exp_node_info[i];
         uint64_t page = node_sector_no(nbr.id);
         float dist = std::max(nbr.distance, 1e-6f);
         page_strength[page] += 1.0f / dist;
       }
-      
+
       float max_strength = 0;
       for (auto &[page, strength] : page_strength) {
         if (strength > max_strength) {
@@ -121,14 +137,14 @@ namespace pipeann {
     // 优化点：使用哈希表加速距离查找，从O(n²)降到O(n)
     std::vector<float> neighbor_dists;
     neighbor_dists.reserve(new_nhood.size());
-    
+
     // DC-PDI优化v2: 预构建ID到距离的映射表
     tsl::robin_map<uint32_t, float> id_to_dist;
     id_to_dist.reserve(exp_node_info.size());
     for (auto &info : exp_node_info) {
       id_to_dist[info.id] = info.distance;
     }
-    
+
     for (auto &nbr_id : new_nhood) {
       auto it = id_to_dist.find(nbr_id);
       if (it != id_to_dist.end()) {
@@ -163,7 +179,7 @@ namespace pipeann {
     // 限制最大分配大小，避免极端情况下的内存爆炸
     // 通常range是96-128，所以实际需求约256页，远小于2*MAX_N_EDGES=2048
     const size_t max_pages = std::min(actual_pages_needed, static_cast<size_t>(2 * this->range + 16));
-    
+
     assert(read_data->update_buf == nullptr);
     pipeann::alloc_aligned((void **) &read_data->update_buf, max_pages * size_per_io, SECTOR_LEN);
     auto &update_buf = read_data->update_buf;
@@ -272,24 +288,26 @@ namespace pipeann {
     // DC-PDI物理离散度统计收集（论文3.3节）
     // 采样策略：每kSampleRate次插入采样一次，避免性能影响
     // 计算目标节点的物理离散度：邻居在不同页面上的数量
-    static thread_local uint32_t insert_counter = 0;
-    if (++insert_counter >= DispersionMonitor::kSampleRate) {
-      insert_counter = 0;
-      
-      // 目标节点的页面ID
-      uint64_t target_page = loc_sector_no(locs[new_nhood.size()]);
-      
-      // 计算物理离散度：统计邻居中有多少在不同页面上
-      uint32_t cross_page_neighbors = 0;
-      for (size_t i = 0; i < new_nhood.size(); ++i) {
-        uint64_t nbr_page = loc_sector_no(locs[i]);
-        if (nbr_page != target_page) {
-          ++cross_page_neighbors;
+    if (!env_disables_dispersion_monitor()) {
+      static thread_local uint32_t insert_counter = 0;
+      if (++insert_counter >= DispersionMonitor::kSampleRate) {
+        insert_counter = 0;
+
+        // 目标节点的页面ID
+        uint64_t target_page = loc_sector_no(locs[new_nhood.size()]);
+
+        // 计算物理离散度：统计邻居中有多少在不同页面上
+        uint32_t cross_page_neighbors = 0;
+        for (size_t i = 0; i < new_nhood.size(); ++i) {
+          uint64_t nbr_page = loc_sector_no(locs[i]);
+          if (nbr_page != target_page) {
+            ++cross_page_neighbors;
+          }
         }
+
+        // 更新统计
+        dispersion_monitor_.update_dispersion(target_page, cross_page_neighbors);
       }
-      
-      // 更新统计
-      dispersion_monitor_.update_dispersion(target_page, cross_page_neighbors);
     }
 #endif
 

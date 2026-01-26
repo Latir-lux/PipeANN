@@ -659,7 +659,7 @@ namespace pipeann {
         // DC-PDI优化v2: 限制处理的邻居数量，减少开销
         // 只考虑距离最近的前16个邻居（通常已排序）
         const size_t max_neighbors_to_consider = std::min(new_neighbors.size(), static_cast<size_t>(16));
-        
+
         // DC-PDI优化v2: 使用简化的连接强度计算
         std::unordered_map<uint64_t, float> page_strength;
         page_strength.reserve(max_neighbors_to_consider);
@@ -829,13 +829,18 @@ namespace pipeann {
       return dispersion_monitor_;
     }
 
+    bool dispersion_monitor_enabled() const {
+      return dispersion_monitor_enabled_;
+    }
+
     bool is_reorganizing() const {
-      return reorg_running_.load();
+      return dispersion_monitor_enabled_ && reorg_running_.load();
     }
 #endif
 
    private:
 #ifdef ENABLE_DISPERSION_MONITOR
+    bool dispersion_monitor_enabled_ = true;
     std::atomic<bool> reorg_running_{false};
     std::atomic<bool> reorg_stop_{false};
     std::thread reorg_thread_;

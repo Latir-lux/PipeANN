@@ -269,7 +269,11 @@ run_search_latency_exp() {
 
   echo "[$(date)] Running search latency test for ${system_name}..."
   rm -f "${output_file}"
-  ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${gt_file_to_use} \
+  local disable_dispersion=0
+  if [ "${system_type}" != "0" ]; then
+    disable_dispersion=1
+  fi
+  PIPEANN_DISABLE_DISPERSION_MONITOR=${disable_dispersion} ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${gt_file_to_use} \
     ${EXP1_UPDATE_FILE} ${system_type} 1 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${EXP1_L_INIT} \
     --exp1-duration-sec ${EXP1_DURATION_SEC} --exp1-update-ratio 1.0 --exp1-target-recall ${EXP1_TARGET_RECALL} \
     --exp1-L-min ${EXP1_L_MIN} --exp1-L-max ${EXP1_L_MAX} --exp1-L-step ${EXP1_L_STEP}
@@ -294,7 +298,11 @@ run_update_throughput_exp() {
   local output_file="${RESULTS_DIR}/exp2_update_throughput_${system_name}.csv"
   
   echo "[$(date)] Running update throughput test for ${system_name}..."
-  ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
+  local disable_dispersion=0
+  if [ "${system_type}" != "0" ]; then
+    disable_dispersion=1
+  fi
+  PIPEANN_DISABLE_DISPERSION_MONITOR=${disable_dispersion} ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
     ${insert_file} ${system_type} 2 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT}
   
   echo "[$(date)] Update throughput test completed: ${output_file}"
@@ -743,7 +751,11 @@ run_concurrent_exp() {
   local output_file="${RESULTS_DIR}/exp3_concurrent_${system_name}.csv"
   
   echo "[$(date)] Running concurrent test for ${system_name} (${duration_sec}s)..."
-  ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
+  local disable_dispersion=0
+  if [ "${system_type}" != "0" ]; then
+    disable_dispersion=1
+  fi
+  PIPEANN_DISABLE_DISPERSION_MONITOR=${disable_dispersion} ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
     ${insert_file} ${system_type} 3 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES} \
     --exp3-duration-sec ${duration_sec} --exp3-update-ratio 1.0
   

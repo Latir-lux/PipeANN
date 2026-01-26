@@ -885,9 +885,9 @@ namespace pipeann {
     unsigned L = parameters.L;  // Search list size
     const unsigned range = parameters.R;
 
-    LOG(INFO) << "Parameters: " << "L: " << L << ", R: " << range
-              << ", saturate_graph: " << (_saturate_graph ? "true" : "false") << ", num_threads: " << num_threads
-              << ", alpha: " << parameters.alpha;
+    LOG(INFO) << "Parameters: "
+              << "L: " << L << ", R: " << range << ", saturate_graph: " << (_saturate_graph ? "true" : "false")
+              << ", num_threads: " << num_threads << ", alpha: " << parameters.alpha;
     if (num_threads != 0)
       omp_set_num_threads(num_threads);
 
@@ -1805,11 +1805,6 @@ namespace pipeann {
     _final_graph[location].clear();
     _final_graph[location].shrink_to_fit();
     _final_graph[location].reserve((uint64_t) (range * SLACK_FACTOR * 1.05));
-
-    if (pruned_list.empty()) {
-      LOG(INFO) << "Thread: " << std::this_thread::get_id() << "Tag id: " << tag
-                << " pruned_list.size(): " << pruned_list.size();
-    }
 
     assert(!pruned_list.empty());
     {

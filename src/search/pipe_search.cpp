@@ -368,12 +368,14 @@ namespace pipeann {
       // 2. 处理所有已读取的节点
       auto [n_processed, nk] = calc_best_nodes();
 
-      // 3. 更新k指针（借鉴beam_search策略）
-      if (n_processed > 0) {
-        if (nk <= k) {
-          k = nk;  // 发现更好的节点，回退k
-        } else {
-          ++k;  // 推进k
+      // 3. 更新k指针（修复：与beam_search保持一致的逻辑）
+      // 关键修复：不论是否处理了节点，都需要更新k
+      if (nk <= k) {
+        k = nk;  // 发现更好的节点，回退k
+      } else if (n_processed > 0) {
+        // 推进k：跳过已访问的节点
+        while (k < cur_list_size && retset[k].visited) {
+          ++k;
         }
       }
 

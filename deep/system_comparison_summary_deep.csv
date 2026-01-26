@@ -1,0 +1,4 @@
+System,QPS@90%,P99(ms)@90%,MeanIOs@90%,Disk(MB)@90%,Concurrent-QPS,QPS-Stability(%)
+DC-PDI,1038,36.19,65.35,8218.4,9,86.5
+IP-DiskANN,1133,33.77,64.61,6769.1,7,78.0
+FreshDiskANN,1117,33.45,64.61,6872.4,9,80.8

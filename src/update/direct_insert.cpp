@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <filesystem>
 
+#ifdef ENABLE_DISPERSION_MONITOR
+#include "utils/dispersion_monitor.h"
+#endif
+
 #include <omp.h>
 #include <chrono>
 #include <cmath>
@@ -253,6 +257,31 @@ namespace pipeann {
 
     std::vector<uint64_t> write_page_ref;
     reader->wbc_write(writes, ctx, &write_page_ref);
+
+#ifdef ENABLE_DISPERSION_MONITOR
+    // DC-PDI物理离散度统计收集（论文3.3节）
+    // 采样策略：每kSampleRate次插入采样一次，避免性能影响
+    // 计算目标节点的物理离散度：邻居在不同页面上的数量
+    static thread_local uint32_t insert_counter = 0;
+    if (++insert_counter >= DispersionMonitor::kSampleRate) {
+      insert_counter = 0;
+      
+      // 目标节点的页面ID
+      uint64_t target_page = loc_sector_no(locs[new_nhood.size()]);
+      
+      // 计算物理离散度：统计邻居中有多少在不同页面上
+      uint32_t cross_page_neighbors = 0;
+      for (size_t i = 0; i < new_nhood.size(); ++i) {
+        uint64_t nbr_page = loc_sector_no(locs[i]);
+        if (nbr_page != target_page) {
+          ++cross_page_neighbors;
+        }
+      }
+      
+      // 更新统计
+      dispersion_monitor_.update_dispersion(target_page, cross_page_neighbors);
+    }
+#endif
 
 #ifndef IN_PLACE_RECORD_UPDATE
     // update locs

@@ -207,27 +207,36 @@ namespace pipeann {
     tsl::robin_set<unsigned> on_flight_ids;
     on_flight_ids.reserve(beam_width * 2);
     
-    // DC-PDI: 跟踪已访问节点数，避免每次调用has_unvisited都扫描整个retset
-    unsigned n_visited = 0;
+    // DC-PDI优化: 借鉴beam_search的k指针策略
+    // k表示下一个需要检查的位置，避免重复扫描已处理的节点
+    unsigned k = 0;
 
-    // DC-PDI: 批量发送I/O请求
-    // 简化逻辑：从头扫描retset，跳过已发送或已读取的节点
+    // DC-PDI优化: 批量发送I/O请求，从k开始扫描 + num_seen限制
+    // 核心优化：借鉴beam_search的双重限制策略，减少无效扫描
     auto send_batch_read_req = [&](uint32_t n) -> unsigned {
       if (n == 0) return 0;
       
       std::vector<std::pair<unsigned, Neighbor*>> to_send;
       to_send.reserve(n);
       
-      // 从头扫描，找到需要发送的节点
-      for (unsigned marker = 0; marker < cur_list_size && to_send.size() < n; ++marker) {
+      // 从k开始扫描，使用num_seen限制扫描范围（beam_search策略）
+      uint32_t marker = k;
+      uint32_t num_seen = 0;
+      
+      // 关键优化：num_seen < beam_width限制扫描范围，避免扫描过多节点
+      while (marker < cur_list_size && to_send.size() < n && num_seen < beam_width) {
         unsigned id = retset[marker].id;
-        // 跳过已发送（在飞行中）或已读取的节点
-        if (on_flight_ids.find(id) == on_flight_ids.end() 
-            && id_buf_map.find(id) == id_buf_map.end()
-            && !retset[marker].visited) {
-          to_send.push_back({marker, &retset[marker]});
-          on_flight_ids.insert(id);
+        // 只计数未访问的节点
+        if (!retset[marker].visited) {
+          num_seen++;
+          // 跳过已发送（在飞行中）或已读取的节点
+          if (on_flight_ids.find(id) == on_flight_ids.end() 
+              && id_buf_map.find(id) == id_buf_map.end()) {
+            to_send.push_back({marker, &retset[marker]});
+            on_flight_ids.insert(id);
+          }
         }
+        ++marker;
       }
       
       if (to_send.empty()) return 0;
@@ -289,35 +298,32 @@ namespace pipeann {
       return n_completed;
     };
 
-    // DC-PDI: 处理已读取的节点
-    // 返回处理的节点数
-    auto calc_best_nodes = [&]() -> unsigned {
+    // DC-PDI优化: 处理已读取的节点，从k开始扫描
+    // 返回<处理节点数, 最佳更新位置nk>，nk用于更新k指针
+    auto calc_best_nodes = [&]() -> std::pair<unsigned, unsigned> {
       unsigned n_processed = 0;
+      unsigned nk = cur_list_size;
       
-      // 从头扫描，处理所有已读取但未访问的节点
-      for (unsigned marker = 0; marker < cur_list_size; ++marker) {
+      // 从k开始扫描，处理所有已读取但未访问的节点
+      for (unsigned marker = k; marker < cur_list_size; ++marker) {
         if (!retset[marker].visited) {
           auto it = id_buf_map.find(retset[marker].id);
           if (it != id_buf_map.end()) {
             retset[marker].visited = true;
-            ++n_visited;  // 更新已访问计数
             compute_exact_dists_and_push(it->second, it->first);
             ++n_processed;
             
-            // 处理邻居
-            unsigned nk = cur_list_size;
-            compute_and_push_nbrs(it->second, nk, it->first);
+            // 处理邻居，nk记录最佳插入位置
+            unsigned local_nk = cur_list_size;
+            compute_and_push_nbrs(it->second, local_nk, it->first);
+            if (local_nk < nk) {
+              nk = local_nk;
+            }
           }
         }
       }
       
-      return n_processed;
-    };
-    
-    // DC-PDI: 检查是否还有未访问的节点
-    // 优化：使用计数器而非每次扫描
-    auto has_unvisited = [&]() -> bool {
-      return n_visited < cur_list_size;
+      return std::make_pair(n_processed, nk);
     };
     
     auto print_state = [&]() {
@@ -352,28 +358,37 @@ namespace pipeann {
     }
 #endif
 
-    // DC-PDI: 主循环 - 简化版本
-    // 终止条件：所有节点都已访问 且 所有I/O都完成
-    while (has_unvisited() || !on_flight_ios.empty()) {
+    // DC-PDI优化: 主循环 - 借鉴beam_search的k指针策略
+    // 终止条件：k >= cur_list_size 且所有飞行I/O都完成
+    while (k < cur_list_size || !on_flight_ios.empty()) {
       // 1. 轮询已完成的I/O
       unsigned n_completed = poll_all();
       
       // 2. 处理所有已读取的节点
-      unsigned n_processed = calc_best_nodes();
+      auto [n_processed, nk] = calc_best_nodes();
       
-      // 3. 发送新的I/O请求（如果有空位）
+      // 3. 更新k指针（借鉴beam_search策略）
+      if (n_processed > 0) {
+        if (nk <= k) {
+          k = nk;  // 发现更好的节点，回退k
+        } else {
+          ++k;  // 推进k
+        }
+      }
+      
+      // 4. 发送新的I/O请求（如果有空位）
       unsigned n_sent = 0;
       if (on_flight_ios.size() < beam_width) {
         n_sent = send_batch_read_req(beam_width - on_flight_ios.size());
       }
       
-      // 4. 如果没有任何进度且有飞行中的I/O，等待I/O完成
+      // 5. 如果没有任何进度且有飞行中的I/O，等待I/O完成
       if (n_completed == 0 && n_processed == 0 && n_sent == 0 && !on_flight_ios.empty()) {
         reader->poll_wait(ctx);
       }
       
-      // 5. 如果没有飞行I/O且无法发送新请求，说明搜索完成或卡住
-      if (on_flight_ios.empty() && n_sent == 0 && !has_unvisited()) {
+      // 6. 终止条件：k到达末尾且无飞行I/O
+      if (k >= cur_list_size && on_flight_ios.empty()) {
         break;
       }
     }

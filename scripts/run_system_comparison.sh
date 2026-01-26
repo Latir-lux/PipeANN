@@ -235,9 +235,14 @@ run_search_latency_exp() {
   local system_index=$(prepare_index ${system_name} ${system_type} "${exp1_index_base}" false "${EXP1_BASE_FILE}")
   local output_file="${RESULTS_DIR}/exp1_search_latency_${system_name}.csv"
 
+  # 使用过滤后的GT文件（EXP1_GT_FILE由prepare_exp1_data设置）
+  # 这样可以正确计算只包含base数据集的recall
+  local gt_file_to_use="${EXP1_GT_FILE:-${GT_FILE}}"
+  echo "[$(date)] Using GT file: ${gt_file_to_use}"
+
   echo "[$(date)] Running search latency test for ${system_name}..."
   rm -f "${output_file}"
-  ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
+  ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${gt_file_to_use} \
     ${EXP1_UPDATE_FILE} ${system_type} 1 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES} \
     --exp1-duration-sec ${EXP1_DURATION_SEC} --exp1-update-ratio 1.0 --exp1-target-recall ${EXP1_TARGET_RECALL}
   
@@ -465,6 +470,7 @@ PY
 
 
 # 准备实验1的数据分片（按比例拆分）
+# 同时生成对应的GT子集文件，解决recall计算不准确的问题
 prepare_exp1_data() {
   local data_file=$1
   local data_type=$2
@@ -490,14 +496,17 @@ PY
   local base_file="${data_prefix}_exp1_base${base_pct}.${data_ext}"
   local update_file="${data_prefix}_exp1_update${update_pct}.${data_ext}"
 
+  # GT子集文件路径
+  local gt_ext="${GT_FILE##*.}"
+  local gt_prefix="${GT_FILE%.*}"
+  local gt_subset_file="${gt_prefix}_exp1_base${base_pct}.${gt_ext}"
+
   if [ -f "${base_file}" ] && [ -f "${update_file}" ]; then
     echo "Using existing exp1 data splits: ${base_file}, ${update_file}" >&2
     EXP1_BASE_FILE=${base_file}
     EXP1_UPDATE_FILE=${update_file}
-    return
-  fi
-
-  python3 - <<PY
+  else
+    python3 - <<PY
 import os
 import struct
 
@@ -549,9 +558,36 @@ if not os.path.exists(update_file):
 print(base_file)
 print(update_file)
 PY
+    EXP1_BASE_FILE=${base_file}
+    EXP1_UPDATE_FILE=${update_file}
+  fi
 
-  EXP1_BASE_FILE=${base_file}
-  EXP1_UPDATE_FILE=${update_file}
+  # 获取基础数据集点数，用于生成GT子集
+  local base_pts_count
+  base_pts_count=$(python3 - <<PY
+import struct
+with open("${EXP1_BASE_FILE}", "rb") as f:
+    npts, dim = struct.unpack("<ii", f.read(8))
+    print(npts)
+PY
+)
+
+  # 生成GT子集文件（只保留ID在[0, base_pts_count)范围内的最近邻）
+  if [ -f "${gt_subset_file}" ]; then
+    echo "Using existing GT subset: ${gt_subset_file}" >&2
+  else
+    echo "Generating GT subset for base ${base_pct}% (${base_pts_count} points)..." >&2
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    python3 "${script_dir}/generate_subset_gt.py" "${GT_FILE}" "${gt_subset_file}" "${base_pts_count}" -v >&2
+    if [ $? -ne 0 ]; then
+      echo "Warning: Failed to generate GT subset, using original GT file" >&2
+      gt_subset_file="${GT_FILE}"
+    fi
+  fi
+
+  EXP1_GT_FILE=${gt_subset_file}
+  echo "Exp1 GT file: ${EXP1_GT_FILE}" >&2
 }
 
 # 准备实验3的数据分片（按比例拆分）

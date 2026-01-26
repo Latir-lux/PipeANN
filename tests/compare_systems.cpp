@@ -13,6 +13,7 @@
 #include "nbr/pq_nbr.h"
 
 #include <index.h>
+#include <algorithm>
 #include <cstddef>
 #include <future>
 #include <numeric>
@@ -710,12 +711,17 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
 }
 
 /**
- * 实验1: 搜索延迟+更新并发 (按目标召回率记录指标)
+ * 实验1: 搜索延迟+更新并发 (动态调整L值以达到目标召回率)
+ * 
+ * 核心改进：
+ * 1. 使用自适应L值调整策略，根据当前recall动态调整搜索参数
+ * 2. 当recall稳定在目标附近时，记录有效的性能指标
+ * 3. 支持L值的上下限约束，避免极端值
  */
 template<typename T, typename TagT = uint32_t>
 void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *query_data, unsigned *gt_ids,
                                    float *gt_dists, size_t query_num, size_t gt_dim, T *insert_data, size_t insert_num,
-                                   size_t data_dim, uint64_t recall_at, uint64_t L, uint32_t beam_width,
+                                   size_t data_dim, uint64_t recall_at, uint64_t L_init, uint32_t beam_width,
                                    double duration_sec, double insert_rate, double target_recall,
                                    SystemType system_type, const std::string &output_file) {
   std::ofstream ofs(output_file, std::ios::app);
@@ -723,6 +729,17 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
     ofs << "system,time_sec,L,recall_at,recall_target,recall_pct,search_qps,p50_lat_us,p90_lat_us,p99_lat_us,"
            "mean_ios,memory_rss_mb,disk_usage_mb,reorg_running\n";
   }
+
+  // L值动态调整参数
+  constexpr uint64_t L_MIN = 30;         // L最小值
+  constexpr uint64_t L_MAX = 500;        // L最大值
+  constexpr uint64_t L_STEP = 5;         // 每次调整步长
+  constexpr double RECALL_TOLERANCE = 2.0;  // 召回率容忍度（±2%）
+  constexpr int STABLE_THRESHOLD = 3;    // 稳定判定所需的连续采样次数
+
+  // 动态L值（原子变量，可被搜索线程安全读取）
+  std::atomic<uint64_t> current_L(L_init);
+  int stable_count = 0;  // 连续稳定的采样次数
 
   std::atomic<uint64_t> query_index(0);
   std::atomic<uint64_t> interval_queries(0);
@@ -746,12 +763,15 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
         idx = 0;
       }
 
+      // 使用当前动态L值
+      uint64_t L_now = current_L.load();
+
       TagT result_tags[recall_at];
       float result_dists[recall_at];
       pipeann::QueryStats stats;
 
       auto qs = std::chrono::high_resolution_clock::now();
-      index.search(query_data + idx * data_dim, recall_at, 0, L, beam_width, result_tags, result_dists, &stats, true);
+      index.search(query_data + idx * data_dim, recall_at, 0, L_now, beam_width, result_tags, result_dists, &stats, true);
       auto qe = std::chrono::high_resolution_clock::now();
 
       double lat_us = std::chrono::duration<double>(qe - qs).count() * 1e6;
@@ -830,6 +850,7 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
   }
 
   std::thread monitor([&]() {
+    bool first_log = true;
     while (!stop_test.load()) {
       std::this_thread::sleep_for(std::chrono::seconds(1));
       auto now = std::chrono::steady_clock::now();
@@ -846,6 +867,45 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
         recall_pct = (static_cast<double>(recall_sum) / 1000.0) / static_cast<double>(queries);
         mean_ios = (static_cast<double>(ios_sum) / 1000.0) / static_cast<double>(queries);
       }
+
+      // ========= 动态调整L值以达到目标召回率 =========
+      uint64_t L_now = current_L.load();
+      double recall_diff = recall_pct - target_recall;
+      
+      if (queries > 0) {
+        if (recall_diff < -RECALL_TOLERANCE) {
+          // 当前recall低于目标，增加L值
+          uint64_t new_L = std::min(L_now + L_STEP, L_MAX);
+          if (new_L != L_now) {
+            current_L.store(new_L);
+            stable_count = 0;
+            if (first_log) {
+              std::cout << "[Exp1] Recall " << recall_pct << "% < target " << target_recall 
+                        << "%, increasing L: " << L_now << " -> " << new_L << std::endl;
+            }
+          }
+        } else if (recall_diff > RECALL_TOLERANCE) {
+          // 当前recall高于目标，减小L值以降低延迟
+          uint64_t new_L = (L_now > L_MIN + L_STEP) ? (L_now - L_STEP) : L_MIN;
+          if (new_L != L_now) {
+            current_L.store(new_L);
+            stable_count = 0;
+            if (first_log) {
+              std::cout << "[Exp1] Recall " << recall_pct << "% > target " << target_recall 
+                        << "%, decreasing L: " << L_now << " -> " << new_L << std::endl;
+            }
+          }
+        } else {
+          // 召回率在目标范围内，增加稳定计数
+          stable_count++;
+          if (stable_count == STABLE_THRESHOLD && first_log) {
+            std::cout << "[Exp1] Recall stabilized at " << recall_pct << "% (target: " 
+                      << target_recall << "%, L=" << L_now << ")" << std::endl;
+            first_log = false;
+          }
+        }
+      }
+      // ========= 动态调整结束 =========
 
       double search_qps = (interval_sec > 0 && queries > 0) ? (queries / interval_sec) : 0.0;
       double p50_lat = 0.0;
@@ -868,7 +928,10 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
 
       int reorg_running = index.is_reorganizing() ? 1 : 0;
       double elapsed_sec = timer.elapsed() / 1e6;
-      ofs << system_names[system_type] << "," << elapsed_sec << "," << L << "," << recall_at << "," << target_recall
+      
+      // 使用当前实际的L值而非初始L值
+      uint64_t L_current = current_L.load();
+      ofs << system_names[system_type] << "," << elapsed_sec << "," << L_current << "," << recall_at << "," << target_recall
           << "," << recall_pct << "," << search_qps << "," << p50_lat << "," << p90_lat << "," << p99_lat << ","
           << mean_ios << "," << (rss_kb / 1024.0) << "," << disk_mb << "," << reorg_running << "\n";
       ofs.flush();
@@ -895,8 +958,9 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
   
   double final_elapsed = timer.elapsed() / 1e6;
   uint64_t final_insert_count = insert_count.load();
+  uint64_t final_L = current_L.load();
   std::cout << "[Exp1] Insert threads completed. Total inserts: " << final_insert_count 
-            << "/" << insert_num << ", elapsed: " << final_elapsed << "s" << std::endl;
+            << "/" << insert_num << ", elapsed: " << final_elapsed << "s, final L: " << final_L << std::endl;
   
   // Now it's safe to stop the test
   stop_test.store(true);

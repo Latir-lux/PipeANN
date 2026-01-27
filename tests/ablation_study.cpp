@@ -737,7 +737,19 @@ void run_scalability_exp(const std::string &index_prefix,
     // 复制索引
     std::string thread_index_prefix = index_prefix + "_scale_" + std::to_string(num_threads);
     
-    if (std::filesystem::exists(index_prefix + "_disk.index")) {
+    try {
+      // 先清理可能存在的旧文件
+      std::filesystem::remove(thread_index_prefix + "_disk.index");
+      std::filesystem::remove(thread_index_prefix + "_pq_compressed.bin");
+      std::filesystem::remove(thread_index_prefix + "_pq_pivots.bin");
+      
+      // 验证源文件存在
+      if (!std::filesystem::exists(index_prefix + "_disk.index")) {
+        std::cerr << "Error: Source index file not found: " << index_prefix << "_disk.index" << std::endl;
+        continue;
+      }
+      
+      // 复制文件并验证
       std::filesystem::copy_file(index_prefix + "_disk.index",
                                  thread_index_prefix + "_disk.index",
                                  std::filesystem::copy_options::overwrite_existing);
@@ -747,6 +759,19 @@ void run_scalability_exp(const std::string &index_prefix,
       std::filesystem::copy_file(index_prefix + "_pq_pivots.bin",
                                  thread_index_prefix + "_pq_pivots.bin",
                                  std::filesystem::copy_options::overwrite_existing);
+      
+      // 验证文件复制成功
+      if (!std::filesystem::exists(thread_index_prefix + "_disk.index")) {
+        std::cerr << "Error: Failed to copy index file" << std::endl;
+        continue;
+      }
+      
+      // 短暂延迟确保文件系统操作完成
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      
+    } catch (const std::exception &e) {
+      std::cerr << "Error copying index files: " << e.what() << std::endl;
+      continue;
     }
 
     pipeann::Parameters paras;
@@ -755,8 +780,15 @@ void run_scalability_exp(const std::string &index_prefix,
     pipeann::Metric metric = pipeann::Metric::L2;
     auto *dist_cmp = pipeann::get_distance_function<T>(metric);
 
-    pipeann::DynamicSSDIndex<T, TagT> dyn_index(paras, thread_index_prefix, thread_index_prefix + "_merge",
-                                                 dist_cmp, metric, PIPE_SEARCH, false);
+    pipeann::DynamicSSDIndex<T, TagT> *dyn_index = nullptr;
+    try {
+      dyn_index = new pipeann::DynamicSSDIndex<T, TagT>(paras, thread_index_prefix, thread_index_prefix + "_merge",
+                                                          dist_cmp, metric, PIPE_SEARCH, false);
+    } catch (const std::exception &e) {
+      std::cerr << "Error initializing DynamicSSDIndex: " << e.what() << std::endl;
+      delete dist_cmp;
+      continue;
+    }
 
     std::atomic<bool> stop_test(false);
     std::atomic<uint64_t> search_count(0);
@@ -777,7 +809,7 @@ void run_scalability_exp(const std::string &index_prefix,
         pipeann::QueryStats stats;
 
         auto qs = std::chrono::high_resolution_clock::now();
-        dyn_index.search(query + idx * query_dim, 10, 0, DEFAULT_L_DISK, DEFAULT_BEAM_WIDTH,
+        dyn_index->search(query + idx * query_dim, 10, 0, DEFAULT_L_DISK, DEFAULT_BEAM_WIDTH,
                         result_tags, result_dists, &stats, true);
         auto qe = std::chrono::high_resolution_clock::now();
 
@@ -800,7 +832,7 @@ void run_scalability_exp(const std::string &index_prefix,
         }
 
         TagT tag = static_cast<TagT>(idx + 10000000);
-        dyn_index.insert(insert_data + (idx % insert_num) * insert_dim, tag);
+        dyn_index->insert(insert_data + (idx % insert_num) * insert_dim, tag);
       }
     };
 
@@ -850,15 +882,27 @@ void run_scalability_exp(const std::string &index_prefix,
 
     ofs << num_threads << "," << total_qps << "," << search_qps << "," << insert_tps << ","
         << avg_lat << "," << p99_lat << "," << linear_efficiency << "\n";
+    ofs.flush();  // 确保数据立即写入文件
 
     std::cout << "  Threads=" << num_threads << ": TotalQPS=" << (int)total_qps
               << ", SearchQPS=" << (int)search_qps << ", InsertTPS=" << (int)insert_tps
               << ", LinEff=" << std::fixed << std::setprecision(2) << (linear_efficiency * 100) << "%" << std::endl;
 
-    // 清理
-    std::filesystem::remove(thread_index_prefix + "_disk.index");
-    std::filesystem::remove(thread_index_prefix + "_pq_compressed.bin");
-    std::filesystem::remove(thread_index_prefix + "_pq_pivots.bin");
+    // 清理索引对象
+    delete dyn_index;
+    dyn_index = nullptr;
+    
+    // 短暂延迟确保资源完全释放
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    
+    // 清理文件
+    try {
+      std::filesystem::remove(thread_index_prefix + "_disk.index");
+      std::filesystem::remove(thread_index_prefix + "_pq_compressed.bin");
+      std::filesystem::remove(thread_index_prefix + "_pq_pivots.bin");
+    } catch (const std::exception &e) {
+      std::cerr << "Warning: Failed to clean up temporary files: " << e.what() << std::endl;
+    }
 
     delete dist_cmp;
   }

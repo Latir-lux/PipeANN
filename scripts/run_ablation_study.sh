@@ -68,7 +68,8 @@ INSERT_COUNT=100000
 DURATION_SEC=120
 INSERT_RATE=1000
 BASE_RATIO=0.5
-L_VALUES="50,100,150,200,250,300"
+# L值范围：10-100，步长5（覆盖低recall 10% 到高recall 95% 的完整范围）
+L_VALUES="10,15,20,25,30,35,40,45,50,55,60,65,70,75,80,85,90,95,100"
 THREAD_LIST="1,4,8,16,32,64"
 RECALL_AT=10
 
@@ -251,9 +252,9 @@ prepare_base_index() {
   
   # 需要构建基础索引
   echo "Building base index (${base_pct}% of data)..." >&2
-  
-  # 分割数据
-  local base_data="${DATA_FILE%.*}_base${base_pct}.bin"
+
+  # 分割数据（使用与run_system_comparison.sh一致的命名，便于复用GT文件）
+  local base_data="${DATA_FILE%.*}_exp1_base${base_pct}.bin"
   if [ ! -f "${base_data}" ]; then
     python3 - >&2 <<PY
 import sys
@@ -307,6 +308,49 @@ PY
   echo "${base_index}"
 }
 
+# ============= 准备实验1专用Groundtruth =============
+# 为分割后的base数据集生成对应的GT文件，确保recall计算正确
+# 注意：GT文件命名与run_system_comparison.sh保持一致，实现跨脚本复用
+prepare_exp1_gt() {
+  local base_ratio=$1
+
+  local base_pct
+  base_pct=$(python3 -c "print(int(round(${base_ratio} * 100)))")
+
+  local gt_ext="${GT_FILE##*.}"
+  local gt_prefix="${GT_FILE%.*}"
+  local exp1_gt_k=100
+  local exp1_gt_file="${gt_prefix}_exp1_base${base_pct}_k${exp1_gt_k}.${gt_ext}"
+
+  if [ -f "${exp1_gt_file}" ]; then
+    echo "Using existing exp1 GT: ${exp1_gt_file}" >&2
+    echo "${exp1_gt_file}"
+    return
+  fi
+
+  # 构造base数据文件路径（与prepare_base_index中的逻辑一致，使用exp1前缀）
+  local base_data="${DATA_FILE%.*}_exp1_base${base_pct}.bin"
+  if [ ! -f "${base_data}" ]; then
+    echo "Error: Base data file not found: ${base_data}" >&2
+    echo "Hint: Make sure prepare_base_index was called first to generate the base data file" >&2
+    exit 1
+  fi
+
+  echo "Generating exp1 GT for base ${base_pct}% (${exp1_gt_k} nearest neighbors)..." >&2
+  if [ ! -x "./build/tests/utils/compute_groundtruth" ]; then
+    echo "Error: ./build/tests/utils/compute_groundtruth not found or not executable" >&2
+    exit 1
+  fi
+
+  ./build/tests/utils/compute_groundtruth "${DATA_TYPE}" "${base_data}" "${QUERY_FILE}" "${exp1_gt_k}" "${exp1_gt_file}" >&2
+  if [ $? -ne 0 ]; then
+    echo "Error: Failed to generate exp1 GT" >&2
+    exit 1
+  fi
+
+  echo "${exp1_gt_file}"
+}
+
 # ============= 函数定义 =============
 
 should_run() {
@@ -327,16 +371,19 @@ run_exp1_clustering() {
   echo "# 实验1: 拓扑感知分配 vs. 随机分配  #"
   echo "######################################"
   echo ""
-  
+
   local exp_index=$(prepare_base_index ${BASE_RATIO})
-  
-  ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${GT_FILE}" \
+
+  # 生成实验1专用的GT文件（基于分割后的base数据集）
+  local exp1_gt=$(prepare_exp1_gt ${BASE_RATIO})
+
+  ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${exp1_gt}" \
     "${INSERT_FILE}" 1 "${RESULTS_DIR}" \
     --num-threads ${NUM_THREADS} \
     --insert-count ${INSERT_COUNT} \
     --L-values "${L_VALUES}" \
     --recall-at ${RECALL_AT}
-  
+
   echo ""
   echo "实验1完成! 结果: ${RESULTS_DIR}/exp_ablation_clustering.csv"
 }

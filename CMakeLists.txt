@@ -101,7 +101,9 @@ check_cxx_compiler_flag("-mavx512f" COMPILER_SUPPORTS_AVX512F)
 check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
 
 # Then, for the runtime.
-set(CPU_SUPPORTS_AVX512 FALSE)
+set(CPU_SUPPORTS_AVX512F FALSE)
+set(CPU_SUPPORTS_AVX512BW FALSE)
+set(CPU_SUPPORTS_AVX512DQ FALSE)
 set(CPU_SUPPORTS_AVX2 FALSE)
 try_run(
 	RUN_RESULT
@@ -112,17 +114,37 @@ try_run(
 	RUN_OUTPUT_VARIABLE RUN_OUT
 )
 
-if(COMPILE_RESULT AND RUN_RESULT EQUAL 3) # AVX512 + AVX2
-	set(CPU_SUPPORTS_AVX512 TRUE)
-	message(STATUS "CPU supports AVX512")
-elseif(COMPILE_RESULT AND RUN_RESULT EQUAL 1) # AVX2
-	set(CPU_SUPPORTS_AVX2 TRUE)
-	message(STATUS "CPU supports AVX2")
-else()
-	message(STATUS "CPU does not support AVX512 or detection failed")
+if(COMPILE_RESULT)
+  if(RUN_RESULT)
+    if(RUN_RESULT & 0x1)
+      set(CPU_SUPPORTS_AVX512F TRUE)
+    endif()
+    if(RUN_RESULT & 0x2)
+      set(CPU_SUPPORTS_AVX512BW TRUE)
+    endif()
+    if(RUN_RESULT & 0x4)
+      set(CPU_SUPPORTS_AVX512DQ TRUE)
+    endif()
+    if(RUN_RESULT & 0x8)
+      set(CPU_SUPPORTS_AVX2 TRUE)
+    endif()
+  endif()
 endif()
 
-if(COMPILER_SUPPORTS_AVX512F AND CPU_SUPPORTS_AVX512)
+if(CPU_SUPPORTS_AVX512F)
+  message(STATUS "CPU supports AVX512F")
+endif()
+if(CPU_SUPPORTS_AVX512BW)
+  message(STATUS "CPU supports AVX512BW")
+endif()
+if(CPU_SUPPORTS_AVX512DQ)
+  message(STATUS "CPU supports AVX512DQ")
+endif()
+if(CPU_SUPPORTS_AVX2)
+  message(STATUS "CPU supports AVX2")
+endif()
+
+if(COMPILER_SUPPORTS_AVX512F AND CPU_SUPPORTS_AVX512F AND CPU_SUPPORTS_AVX512BW AND CPU_SUPPORTS_AVX512DQ)
     message(STATUS "Compiler and CPU supports -mavx512f. Enabling AVX512F.")
     add_compile_options(-mavx512f -mavx512bw -mavx512dq)
 	add_definitions(-DUSE_AVX512)
@@ -131,7 +153,7 @@ elseif(COMPILER_SUPPORTS_AVX2 AND CPU_SUPPORTS_AVX2)
 	add_compile_options(-mavx2)
 	add_definitions(-DUSE_AVX2)
 else()
-    message(STATUS "Compiler or CPU do not support -mavx512f and -mavx2.")
+	message(STATUS "Compiler or CPU do not support AVX512(F/BW/DQ) or AVX2.")
 endif()
 
 #OpenMP

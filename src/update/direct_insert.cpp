@@ -82,15 +82,15 @@ namespace pipeann {
                          false, &page_ref);
     std::vector<uint32_t> new_nhood;
 
-    // DC-PDI优化v3: 块感知剪枝（论文4.2节）
+    // DC-PDI优化v4: 块感知剪枝（论文4.2节）
     // 优化点：
-    // 1. 使用最简单的策略：选择最近邻所在页面作为目标页面
-    // 2. 减少不必要的map和循环操作
+    // 1. 降低阈值到4个邻居即可启用
+    // 2. 使用最简单的策略：选择最近邻所在页面作为目标页面
     // 3. 只有在DC-PDI模式（PIPE_SEARCH）下才启用，确保不影响IP-DiskANN/FreshDiskANN
 #ifdef ENABLE_BLOCK_AWARE_PRUNE
-    const size_t min_neighbors_for_block_aware = 6;
+    const size_t min_neighbors_for_block_aware = 4;
     if (is_dcpdi && !page_ref.empty() && exp_node_info.size() >= min_neighbors_for_block_aware) {
-      // DC-PDI优化v3: 直接使用最近邻（第一个）所在页面作为目标页面
+      // DC-PDI优化v4: 直接使用最近邻（第一个）所在页面作为目标页面
       uint64_t target_page = node_sector_no(exp_node_info[0].id);
       prune_neighbors_block_aware(coord_map, exp_node_info, new_nhood, target_page);
     } else {

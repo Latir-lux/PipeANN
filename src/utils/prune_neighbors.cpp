@@ -241,12 +241,15 @@ namespace pipeann {
   }
 
   /**
-   * DC-PDI优化v3: 块感知邻居剪枝（论文4.2节）
+   * DC-PDI优化v4: 块感知邻居剪枝（论文4.2节）
+   * 
+   * 新策略：不修改距离，而是在相同距离时优先选择同页邻居
+   * 原因：即使1.05的惩罚也会影响图质量，导致召回率下降
    * 
    * 优化策略：
-   * 1. 使用更低的惩罚系数(1.05)减少对图质量的影响
-   * 2. 只对距离较远的候选应用惩罚（距离最近的几个保持不变）
-   * 3. 避免不必要的排序操作
+   * 1. 保持原始距离不变，确保图质量
+   * 2. 在occlude_list中使用自定义比较器，同距离时优先同页
+   * 3. 作为最终的tie-breaker，对图质量影响最小
    */
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::prune_neighbors_block_aware(
@@ -257,35 +260,37 @@ namespace pipeann {
     
     if (pool.empty()) return;
     
-    // DC-PDI优化v3: 进一步降低惩罚系数到1.05
-    // 分析：1.1的惩罚仍然对搜索质量有影响
-    // 1.05是一个更温和的惩罚，主要作为tie-breaker使用
-    constexpr float kCrossPagePenalty = 1.05f;
-    
-    // DC-PDI优化v3: 只对排名靠后的候选应用惩罚
-    // 前range/2个最近邻不应用惩罚，保证核心邻居质量
-    const size_t pool_size = pool.size();
-    const size_t skip_count = std::min(static_cast<size_t>(range / 2), pool_size);
-    
-    // 首先对pool排序（如果还没排序）
+    // 首先对pool排序
     std::sort(pool.begin(), pool.end());
     
-    // DC-PDI优化v3: 只处理skip_count之后的候选
-    // 前skip_count个保持原距离，后面的应用轻微惩罚
+    // DC-PDI优化v4: 使用极小的epsilon作为tie-breaker
+    // 只有在距离差异小于epsilon时才考虑页面局部性
+    constexpr float kEpsilon = 1e-6f;
+    
+    // 对距离相近的候选进行重排序：同页优先
+    // 使用稳定排序保持原有相对顺序
+    const size_t pool_size = pool.size();
     const size_t process_count = std::min(pool_size, static_cast<size_t>(maxc));
-    bool need_resort = false;
     
-    for (size_t i = skip_count; i < process_count; i++) {
-      uint64_t nbr_page = node_sector_no(pool[i].id);
-      if (nbr_page != target_page) {
-        pool[i].distance *= kCrossPagePenalty;
-        need_resort = true;
+    // DC-PDI优化v4: 使用lambda进行局部重排
+    // 对于距离差异在epsilon内的连续段，将同页邻居排在前面
+    for (size_t i = 0; i < process_count; ) {
+      // 找到距离相近的段
+      size_t j = i + 1;
+      float base_dist = pool[i].distance;
+      while (j < process_count && (pool[j].distance - base_dist) < kEpsilon * base_dist) {
+        ++j;
       }
-    }
-    
-    // DC-PDI优化v3: 只有当确实有距离被修改时才重新排序
-    if (need_resort) {
-      std::sort(pool.begin(), pool.end());
+      
+      // 如果段长度大于1，在段内将同页邻居移到前面
+      if (j - i > 1) {
+        // 使用stable_partition保持同页和跨页各自的相对顺序
+        std::stable_partition(pool.begin() + i, pool.begin() + j, 
+          [this, target_page](const Neighbor& nbr) {
+            return node_sector_no(nbr.id) == target_page;
+          });
+      }
+      i = j;
     }
     
     // 使用原有剪枝逻辑
@@ -313,11 +318,6 @@ namespace pipeann {
         }
       }
     }
-    
-    // DC-PDI优化v2: 不恢复距离
-    // 分析：pool在剪枝后不再使用，恢复距离是不必要的开销
-    // 注释掉恢复逻辑以提高性能
-    // 如果caller需要原始距离，应在调用前保存
   }
 
   /**

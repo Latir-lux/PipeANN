@@ -213,8 +213,9 @@ namespace pipeann {
     // k表示下一个需要检查的位置，避免重复扫描已处理的节点
     unsigned k = 0;
 
-    // DC-PDI优化v3: 批量发送I/O请求，简化逻辑
-    // 关键优化：使用flag字段追踪已发送状态，避免额外的哈希集合
+    // DC-PDI优化v4: 批量发送I/O请求
+    // 关键改进：移除num_seen限制，只用to_send.size()控制
+    // 原因：num_seen限制会导致扫描范围过小，错过好的候选
     auto send_batch_read_req = [&](uint32_t n) -> unsigned {
       if (n == 0)
         return 0;
@@ -222,17 +223,18 @@ namespace pipeann {
       std::vector<std::pair<unsigned, Neighbor *>> to_send;
       to_send.reserve(n);
 
-      // 从k开始扫描，使用num_seen限制扫描范围（beam_search策略）
+      // DC-PDI优化v4：从k开始扫描，不使用num_seen限制
+      // 只控制to_send.size() < n即可
       uint32_t marker = k;
-      uint32_t num_seen = 0;
 
-      // DC-PDI优化v3：简化判断条件
+      // DC-PDI优化v4：简化判断条件，同时增加扫描深度
       // flag=true表示未发送，flag=false表示已发送
       // visited=true表示已处理完成
-      while (marker < cur_list_size && to_send.size() < n && num_seen < beam_width) {
-        // DC-PDI优化v3: 只有flag=true且未读取的节点才发送
+      // 扫描深度限制：避免扫描过多节点（最多扫描2*beam_width个未发送节点）
+      uint32_t scan_limit = marker + beam_width * 3;  // 限制扫描范围
+      while (marker < cur_list_size && marker < scan_limit && to_send.size() < n) {
+        // DC-PDI优化v4: 只有flag=true且未读取的节点才发送
         if (retset[marker].flag && !retset[marker].visited) {
-          num_seen++;
           unsigned id = retset[marker].id;
           // 跳过已读取的节点
           if (id_buf_map.find(id) == id_buf_map.end()) {
@@ -363,10 +365,12 @@ namespace pipeann {
     }
 #endif
 
-    // DC-PDI优化v3: 主循环 - 借鉴beam_search的k指针策略
-    // 终止条件：k >= cur_list_size 且所有飞行I/O都完成
-    // 新增: 早停条件 - 当k达到k_search*2且没有更好的候选时提前退出
-    const unsigned early_stop_threshold = std::max(k_search * 2, static_cast<uint64_t>(beam_width));
+    // DC-PDI优化v4: 主循环 - 更激进的早停策略
+    // 分析：beam_search在k > nk时终止，我们应该更接近这个策略
+    // 原来k_search*2太保守，导致额外的I/O开销
+    // 新策略：当已收集足够结果且k超过阈值时停止
+    // 阈值设为k_search + beam_width，确保有足够的候选同时避免过多I/O
+    const unsigned early_stop_threshold = static_cast<unsigned>(k_search) + beam_width;
     
     while (k < cur_list_size || !on_flight_ios.empty()) {
       // 1. 轮询已完成的I/O

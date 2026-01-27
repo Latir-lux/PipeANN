@@ -651,12 +651,12 @@ namespace pipeann {
     }
 
     /**
-     * DC-PDI: 基于聚类感知的位置分配（论文3.2节）
+     * DC-PDI优化v4: 基于聚类感知的位置分配（论文3.2节）
      *
-     * 优化v3:
-     * - 进一步限制候选页面数量到8个
-     * - 使用最简单的计数策略代替连接强度
-     * - 快速失败回退到标准分配
+     * 优化点：
+     * - 降低最低邻居数阈值，允许1个邻居即可尝试聚类
+     * - 优化页面选择：优先选择最近邻所在页面
+     * - 减少不必要的循环和检查
      *
      * @param n 需要分配的位置数
      * @param new_neighbors 新节点的邻居ID列表
@@ -672,65 +672,75 @@ namespace pipeann {
       int cur = 0;
       uint32_t threshold = (nnodes_per_sector + kIndexSizeFactor - 1) / kIndexSizeFactor;
 
-      // DC-PDI优化v3: 快速路径 - 邻居数量少于4个时直接使用标准分配
-      // 因为聚类感知对于少量邻居效果有限
-      if (new_neighbors.size() < 4 || neighbor_dists.empty()) {
+      // DC-PDI优化v4: 快速路径 - 只有无邻居时才跳过聚类感知
+      if (new_neighbors.empty()) {
         goto standard_alloc;
       }
 
       {
-        // DC-PDI优化v3: 只考虑前8个最近邻
-        const size_t max_neighbors_to_consider = std::min(new_neighbors.size(), static_cast<size_t>(8));
-
-        // DC-PDI优化v3: 使用简单计数代替连接强度
-        // 统计每个页面出现的次数，出现次数多的页面优先
-        std::unordered_map<uint64_t, uint32_t> page_count;
-        page_count.reserve(max_neighbors_to_consider);
-
-        for (size_t i = 0; i < max_neighbors_to_consider; i++) {
-          uint64_t page = node_sector_no(new_neighbors[i]);
-          page_count[page]++;
-        }
-
-        // DC-PDI优化v3: 快速选择最佳页面
-        // 找到出现次数最多的页面，如果有多个则选择第一个（距离最近的邻居所在页面）
-        uint64_t best_page = 0;
-        uint32_t best_count = 0;
+        // DC-PDI优化v4: 直接使用最近邻所在页面作为首选
+        // 因为最近邻的页面局部性对搜索性能影响最大
         uint64_t first_nbr_page = node_sector_no(new_neighbors[0]);
         
-        for (auto &[page, count] : page_count) {
-          if (count > best_count || (count == best_count && page == first_nbr_page)) {
-            best_count = count;
-            best_page = page;
-          }
-        }
-
-        // DC-PDI优化v3: 只尝试最佳页面，失败则直接回退
-        if (best_count >= 2) {  // 至少2个邻居在同一页面才值得尝试
+        // DC-PDI优化v4: 尝试分配到最近邻所在页面
 #ifdef NO_POLLUTE_ORIGINAL
-          if (best_page >= loc_sector_no(init_num_pts)) {
+        if (first_nbr_page >= loc_sector_no(init_num_pts)) {
 #else
-          {
+        {
 #endif
-            auto st = sector_to_loc(best_page, 0);
-            auto ed = nnodes_per_sector == 0 ? st + 1 : st + nnodes_per_sector;
+          auto st = sector_to_loc(first_nbr_page, 0);
+          auto ed = nnodes_per_sector == 0 ? st + 1 : st + nnodes_per_sector;
 
-            uint32_t empty_count = 0;
-            for (uint32_t i = st; i < ed; i++) {
-              if (loc2id_[i] == kInvalidID)
-                empty_count++;
+          uint32_t empty_count = 0;
+          for (uint32_t i = st; i < ed; i++) {
+            if (loc2id_[i] == kInvalidID)
+              empty_count++;
+          }
+
+          if (empty_count >= threshold) {
+            if (empty_count < nnodes_per_sector) {
+              page_need_to_read.insert(first_nbr_page);
             }
 
-            if (empty_count >= threshold) {
-              if (empty_count < nnodes_per_sector) {
-                page_need_to_read.insert(best_page);
+            for (uint32_t i = st; i < ed && cur < n; i++) {
+              if (loc2id_[i] == kInvalidID) {
+                loc2id_[i] = kAllocatedID;
+                ret.push_back(i);
+                cur++;
+              }
+            }
+          }
+        }
+        
+        // DC-PDI优化v4: 如果首选页面失败，尝试第二近邻页面（如果有且不同）
+        if (cur < n && new_neighbors.size() >= 2) {
+          uint64_t second_nbr_page = node_sector_no(new_neighbors[1]);
+          if (second_nbr_page != first_nbr_page) {
+#ifdef NO_POLLUTE_ORIGINAL
+            if (second_nbr_page >= loc_sector_no(init_num_pts)) {
+#else
+            {
+#endif
+              auto st = sector_to_loc(second_nbr_page, 0);
+              auto ed = nnodes_per_sector == 0 ? st + 1 : st + nnodes_per_sector;
+
+              uint32_t empty_count = 0;
+              for (uint32_t i = st; i < ed; i++) {
+                if (loc2id_[i] == kInvalidID)
+                  empty_count++;
               }
 
-              for (uint32_t i = st; i < ed && cur < n; i++) {
-                if (loc2id_[i] == kInvalidID) {
-                  loc2id_[i] = kAllocatedID;
-                  ret.push_back(i);
-                  cur++;
+              if (empty_count >= threshold) {
+                if (empty_count < nnodes_per_sector) {
+                  page_need_to_read.insert(second_nbr_page);
+                }
+
+                for (uint32_t i = st; i < ed && cur < n; i++) {
+                  if (loc2id_[i] == kInvalidID) {
+                    loc2id_[i] = kAllocatedID;
+                    ret.push_back(i);
+                    cur++;
+                  }
                 }
               }
             }

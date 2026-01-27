@@ -255,7 +255,8 @@ prepare_base_index() {
   # 分割数据
   local base_data="${DATA_FILE%.*}_base${base_pct}.bin"
   if [ ! -f "${base_data}" ]; then
-    python3 - <<PY
+    python3 - >&2 <<PY
+import sys
 import struct
 
 data_file = "${DATA_FILE}"
@@ -265,19 +266,22 @@ data_type = "${DATA_TYPE}"
 
 dtype_size = {"uint8": 1, "int8": 1, "float": 4}.get(data_type)
 if dtype_size is None:
-    raise SystemExit(f"Unsupported data type: {data_type}")
+    print(f"Unsupported data type: {data_type}", file=sys.stderr)
+    sys.exit(1)
 
 with open(data_file, "rb") as f:
     header = f.read(8)
     if len(header) != 8:
-        raise SystemExit(f"Invalid data file header: {data_file}")
+        print(f"Invalid data file header: {data_file}", file=sys.stderr)
+        sys.exit(1)
     npts, dim = struct.unpack("<ii", header)
 
 base_pts = int(npts * base_ratio)
 if base_pts <= 0:
-    raise SystemExit(f"Invalid base_pts: {base_pts}")
+    print(f"Invalid base_pts: {base_pts}", file=sys.stderr)
+    sys.exit(1)
 
-print(f"Splitting: {base_pts} / {npts} vectors")
+print(f"Splitting: {base_pts} / {npts} vectors", file=sys.stderr)
 
 with open(data_file, "rb") as src, open(base_file, "wb") as dst:
     dst.write(struct.pack("<ii", base_pts, dim))
@@ -288,7 +292,8 @@ with open(data_file, "rb") as src, open(base_file, "wb") as dst:
         to_read = min(buf_size, remaining_bytes)
         chunk = src.read(to_read)
         if not chunk:
-            raise SystemExit(f"Unexpected EOF while reading {data_file}")
+            print(f"Unexpected EOF while reading {data_file}", file=sys.stderr)
+            sys.exit(1)
         dst.write(chunk)
         remaining_bytes -= len(chunk)
 PY
@@ -325,11 +330,11 @@ run_exp1_clustering() {
   
   local exp_index=$(prepare_base_index ${BASE_RATIO})
   
-  ./build/tests/ablation_study ${DATA_TYPE} ${exp_index} ${QUERY_FILE} ${GT_FILE} \
-    ${INSERT_FILE} 1 ${RESULTS_DIR} \
+  ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${GT_FILE}" \
+    "${INSERT_FILE}" 1 "${RESULTS_DIR}" \
     --num-threads ${NUM_THREADS} \
     --insert-count ${INSERT_COUNT} \
-    --L-values ${L_VALUES} \
+    --L-values "${L_VALUES}" \
     --recall-at ${RECALL_AT}
   
   echo ""
@@ -346,8 +351,8 @@ run_exp2_reorganization() {
   
   local exp_index=$(prepare_base_index ${BASE_RATIO})
   
-  ./build/tests/ablation_study ${DATA_TYPE} ${exp_index} ${QUERY_FILE} ${GT_FILE} \
-    ${INSERT_FILE} 2 ${RESULTS_DIR} \
+  ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${GT_FILE}" \
+    "${INSERT_FILE}" 2 "${RESULTS_DIR}" \
     --num-threads ${NUM_THREADS} \
     --duration ${DURATION_SEC} \
     --insert-rate ${INSERT_RATE}
@@ -370,10 +375,10 @@ run_exp3_pipeline() {
     exp_index=$(prepare_base_index 1.0)
   fi
   
-  ./build/tests/ablation_study ${DATA_TYPE} ${exp_index} ${QUERY_FILE} ${GT_FILE} \
-    ${INSERT_FILE} 3 ${RESULTS_DIR} \
+  ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${GT_FILE}" \
+    "${INSERT_FILE}" 3 "${RESULTS_DIR}" \
     --num-threads ${NUM_THREADS} \
-    --L-values ${L_VALUES} \
+    --L-values "${L_VALUES}" \
     --recall-at ${RECALL_AT}
   
   echo ""
@@ -390,10 +395,10 @@ run_exp4_scalability() {
   
   local exp_index=$(prepare_base_index ${BASE_RATIO})
   
-  ./build/tests/ablation_study ${DATA_TYPE} ${exp_index} ${QUERY_FILE} ${GT_FILE} \
-    ${INSERT_FILE} 4 ${RESULTS_DIR} \
+  ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${GT_FILE}" \
+    "${INSERT_FILE}" 4 "${RESULTS_DIR}" \
     --duration ${DURATION_SEC} \
-    --thread-list ${THREAD_LIST}
+    --thread-list "${THREAD_LIST}"
   
   echo ""
   echo "实验4完成! 结果: ${RESULTS_DIR}/exp_ablation_scalability.csv"

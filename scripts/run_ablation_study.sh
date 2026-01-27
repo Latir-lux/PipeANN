@@ -243,18 +243,12 @@ prepare_exp1_data() {
   local data_ext="${data_file##*.}"
   local data_prefix="${data_file%.*}"
 
+  # 转换比例为标签格式（与run_system_comparison.sh保持一致）
+  # 0.8 → 0p8, 0.5 → 0p5
   local base_pct
-  base_pct=$(python3 - <<PY
-import math
-print(int(round(${base_ratio} * 100)))
-PY
-)
+  base_pct=$(printf "%s" "${base_ratio}" | tr '.' 'p')
   local update_pct
-  update_pct=$(python3 - <<PY
-import math
-print(int(round(${update_ratio} * 100)))
-PY
-)
+  update_pct=$(printf "%s" "${update_ratio}" | tr '.' 'p')
 
   local base_file="${data_prefix}_exp1_base${base_pct}.${data_ext}"
   local update_file="${data_prefix}_exp1_update${update_pct}.${data_ext}"
@@ -351,7 +345,10 @@ PY
   if [ -f "${exp1_gt_file}" ]; then
     echo "Using existing exp1 GT: ${exp1_gt_file}" >&2
   else
-    echo "Generating exp1 GT for base ${base_pct}% (${base_pts_count} points), K=${exp1_gt_k}..." >&2
+    # 为日志输出计算百分比值（0p8 -> 80）
+    local base_pct_display
+    base_pct_display=$(python3 -c "print(int(round(${base_ratio} * 100)))")
+    echo "Generating exp1 GT for base ${base_pct_display}% (${base_pts_count} points), K=${exp1_gt_k}..." >&2
     if [ ! -x "./build/tests/utils/compute_groundtruth" ]; then
       echo "Error: ./build/tests/utils/compute_groundtruth not found or not executable" >&2
       exit 1
@@ -431,7 +428,7 @@ run_exp1_clustering() {
   # 准备实验1的数据分片（从run_system_comparison.sh复用）
   prepare_exp1_data ${DATA_FILE} ${DATA_TYPE} ${BASE_RATIO} 0.5
   local base_pct
-  base_pct=$(python3 -c "print(int(round(${BASE_RATIO} * 100)))")
+  base_pct=$(printf "%s" "${BASE_RATIO}" | tr '.' 'p')
 
   # 使用run_system_comparison.sh的exp1索引路径
   local exp_index="${INDEX_BASE}_exp1_base${base_pct}"

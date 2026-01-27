@@ -61,8 +61,10 @@ public:
   // 触发重组织的碎片页比例阈值
   static constexpr float kReorganizeTriggerRatio = 0.2f;  // 20%
   
-  // 采样率（每100次访问采样一次）
-  static constexpr uint32_t kSampleRate = 100;
+  // DC-PDI采样率优化：每20次插入采样一次
+  // 原来是100，但对于短时间实验来说太慢了
+  // 降低到20可以更快收集足够的统计数据
+  static constexpr uint32_t kSampleRate = 20;
   
 private:
   std::unordered_map<uint64_t, PageDispersionStats> page_stats_;

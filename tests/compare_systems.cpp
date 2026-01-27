@@ -13,7 +13,9 @@
 #include "nbr/pq_nbr.h"
 
 #include <index.h>
+#include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <future>
 #include <numeric>
 #include <omp.h>
@@ -184,6 +186,7 @@ const int NUM_SEARCH_THREADS = 32;
 const int NUM_INSERT_THREADS = 10;
 const int NUM_DELETE_THREADS = 1;
 const int MERGE_INTERVAL = 10000;  // FreshDiskANN每10000次更新合并一次
+static uint32_t BUILD_RAM_GB = 0;
 
 // 获取内存使用
 void get_memory_usage(double &rss_kb, double &vm_kb) {
@@ -309,8 +312,11 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
     delete[] gt_dists;
     return;
   }
-  if (gt_dim < recall_at) {
-    std::cerr << "Error: Groundtruth k (" << gt_dim << ") is smaller than recall@" << recall_at << "." << std::endl;
+  int recall_min = 10;
+  int recall_max = std::min(99, static_cast<int>(gt_dim));
+  recall_max = std::min(recall_max, static_cast<int>(recall_at));
+  if (recall_max < recall_min) {
+    std::cerr << "Error: Groundtruth k (" << gt_dim << ") is smaller than recall@" << recall_min << "." << std::endl;
     delete[] query;
     delete[] gt_ids;
     delete[] gt_dists;
@@ -329,6 +335,11 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
 
   // 加载索引
   pipeann::SSDIndex<T, TagT> index(pipeann::L2, reader, nbr_handler, false);
+  
+  // DC-PDI优化控制：设置搜索模式，这样SSDIndex可以根据模式启用DC-PDI特有优化
+  // 必须在load之前设置，因为load可能会初始化与搜索模式相关的数据结构
+  index.set_search_mode(search_mode);
+  
   int load_result = index.load(index_prefix.c_str(), num_threads, true, use_page_search);
 
   if (load_result != 0) {
@@ -350,13 +361,16 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
   std::cout << "Loaded index for " << system_names[system_type] << ", num_points=" << index.num_points << std::endl;
 
   // 输出文件
-  std::ofstream ofs(output_file);
-  ofs << "system,L,recall,qps,avg_lat_us,p50_lat_us,p90_lat_us,p95_lat_us,p99_lat_us,mean_ios,io_amplification\n";
+  std::ofstream ofs(output_file, std::ios::app);
+  if (ofs.tellp() == 0) {
+    ofs << "system,recall_at,L,recall,qps,avg_lat_us,p50_lat_us,p90_lat_us,p95_lat_us,p99_lat_us,mean_ios,"
+           "io_amplification,reorg_running\n";
+  }
 
   // 测试不同L值
   for (auto L : L_values) {
-    TagT *query_result_tags = new TagT[recall_at * query_num];
-    float *query_result_dists = new float[recall_at * query_num];
+    TagT *query_result_tags = new TagT[recall_max * query_num];
+    float *query_result_dists = new float[recall_max * query_num];
     pipeann::QueryStats *stats = new pipeann::QueryStats[query_num];
     std::vector<double> latency_stats(query_num, 0);
 
@@ -367,11 +381,11 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
       auto qs = std::chrono::high_resolution_clock::now();
 
       if (search_mode == PIPE_SEARCH) {
-        index.pipe_search(query + (i * query_dim), recall_at, 0, L, query_result_tags + (i * recall_at),
-                          query_result_dists + (i * recall_at), beam_width, stats + i);
+        index.pipe_search(query + (i * query_dim), recall_max, 0, L, query_result_tags + (i * recall_max),
+                          query_result_dists + (i * recall_max), beam_width, stats + i);
       } else {
-        index.beam_search(query + (i * query_dim), recall_at, 0, L, query_result_tags + (i * recall_at),
-                          query_result_dists + (i * recall_at), beam_width, stats + i);
+        index.beam_search(query + (i * query_dim), recall_max, 0, L, query_result_tags + (i * recall_max),
+                          query_result_dists + (i * recall_max), beam_width, stats + i);
       }
 
       auto qe = std::chrono::high_resolution_clock::now();
@@ -391,10 +405,6 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
     double p95 = latency_stats[query_num * 0.95];
     double p99 = latency_stats[query_num * 0.99];
 
-    // 计算召回率
-    double recall = pipeann::calculate_recall((uint32_t) query_num, gt_ids, gt_dists, (uint32_t) gt_dim,
-                                              query_result_tags, (uint32_t) recall_at, (uint32_t) recall_at);
-
     // 计算平均IO次数
     double mean_ios = 0.0;
     for (size_t i = 0; i < query_num; i++) {
@@ -402,15 +412,22 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
     }
     mean_ios /= query_num;
 
-    // IO放大率 = 实际IO次数 / 理论最少IO次数
-    double io_amplification = mean_ios / recall_at;
+    int reorg_running = 0;
+#ifdef ENABLE_DISPERSION_MONITOR
+    reorg_running = index.is_reorganizing() ? 1 : 0;
+#endif
+    for (int recall_k = recall_min; recall_k <= recall_max; ++recall_k) {
+      double recall = pipeann::calculate_recall((uint32_t) query_num, gt_ids, gt_dists, (uint32_t) gt_dim,
+                                                query_result_tags, (uint32_t) recall_max, (uint32_t) recall_k);
+      double io_amplification = mean_ios / recall_k;
 
-    // 输出结果
-    ofs << system_names[system_type] << "," << L << "," << recall << "," << qps << "," << avg_lat << "," << p50 << ","
-        << p90 << "," << p95 << "," << p99 << "," << mean_ios << "," << io_amplification << "\n";
+      ofs << system_names[system_type] << "," << recall_k << "," << L << "," << recall << "," << qps << "," << avg_lat
+          << "," << p50 << "," << p90 << "," << p95 << "," << p99 << "," << mean_ios << "," << io_amplification << ","
+          << reorg_running << "\n";
 
-    std::cout << system_names[system_type] << " L=" << L << ": Recall=" << recall << ", QPS=" << qps << ", P99=" << p99
-              << "us, MeanIOs=" << mean_ios << std::endl;
+      std::cout << system_names[system_type] << " L=" << L << ": Recall@" << recall_k << "=" << recall
+                << ", QPS=" << qps << ", P99=" << p99 << "us, MeanIOs=" << mean_ios << std::endl;
+    }
 
     delete[] query_result_tags;
     delete[] query_result_dists;
@@ -429,14 +446,17 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
  */
 template<typename T, typename TagT = uint32_t>
 void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *insert_data, size_t num_inserts,
-                               size_t data_dim, SystemType system_type, bool trigger_merge,
-                               const std::string &output_file) {
+                               size_t data_dim, SystemType system_type, const std::string &output_file) {
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
-    ofs << "system,time_sec,num_inserts,throughput_ops,memory_rss_mb,disk_usage_mb,merge_triggered\n";
+    ofs << "system,time_sec,num_inserts,throughput_ops,memory_rss_mb,disk_usage_mb,merge_triggered,reorg_running\n";
   }
 
   std::atomic<uint64_t> insert_count(0);
+  uint64_t base_tag_offset = 0;
+  if (index._disk_index != nullptr) {
+    base_tag_offset = index._disk_index->num_points;
+  }
   std::atomic<bool> merge_done(false);
   std::atomic<bool> stop_insert(false);
 
@@ -450,16 +470,9 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
       if (idx >= num_inserts)
         break;
 
-      TagT tag = static_cast<TagT>(idx + 1000000);  // 避免与现有数据冲突
+      TagT tag = static_cast<TagT>(base_tag_offset + idx);  // 与GT ID对齐
       index.insert(insert_data + idx * data_dim, tag);
       local_count++;
-
-      // FreshDiskANN模式: 周期性触发合并
-      if (system_type == FRESH_DISKANN && trigger_merge && idx % MERGE_INTERVAL == MERGE_INTERVAL - 1) {
-        std::cout << "[" << system_names[system_type] << "] Triggering merge at " << idx << " inserts" << std::endl;
-        index.final_merge(NUM_SEARCH_THREADS);
-        merge_done.store(true);
-      }
     }
   };
 
@@ -482,8 +495,12 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
       get_memory_usage(rss_kb, vm_kb);
       double disk_mb = static_cast<double>(get_disk_usage_bytes(index._disk_index_prefix_in)) / (1024.0 * 1024.0);
 
+      int reorg_running = 0;
+#ifdef ENABLE_DISPERSION_MONITOR
+      reorg_running = index.is_reorganizing() ? 1 : 0;
+#endif
       ofs << system_names[system_type] << "," << elapsed_sec << "," << current_inserts << "," << throughput << ","
-          << (rss_kb / 1024.0) << "," << disk_mb << "," << (merge_done.load() ? 1 : 0) << "\n";
+          << (rss_kb / 1024.0) << "," << disk_mb << "," << (merge_done.load() ? 1 : 0) << "," << reorg_running << "\n";
       ofs.flush();
 
       if (current_inserts >= num_inserts) {
@@ -506,6 +523,17 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
   std::cout << "[" << system_names[system_type] << "] Insert completed: " << num_inserts << " ops in " << total_time
             << "s, throughput=" << final_throughput << " ops/s" << std::endl;
 
+  if (system_type == FRESH_DISKANN && !merge_done.load()) {
+    uint64_t final_inserts = insert_count.load();
+    if (final_inserts > 0) {
+      std::cout << "[" << system_names[system_type] << "] Requesting final merge at " << final_inserts << " inserts"
+                << std::endl;
+      index.request_merge_async(NUM_SEARCH_THREADS);
+      index.wait_merge();
+      merge_done.store(true);
+    }
+  }
+
   ofs.close();
 }
 
@@ -520,11 +548,16 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
                                     SystemType system_type, const std::string &output_file) {
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
-    ofs << "system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb,disk_usage_mb\n";
+    ofs << "system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb,disk_usage_mb,reorg_"
+           "running\n";
   }
 
   std::atomic<uint64_t> search_count(0);
   std::atomic<uint64_t> insert_count(0);
+  uint64_t base_tag_offset = 0;
+  if (index._disk_index != nullptr) {
+    base_tag_offset = index._disk_index->num_points;
+  }
   std::atomic<bool> stop_test(false);
 
   std::vector<double> search_latencies;
@@ -572,16 +605,18 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
         }
       }
       uint64_t idx = insert_count.fetch_add(1);
-      if (idx >= insert_num)
+      if (idx >= insert_num) {
+        // All inserts completed, log and exit
+        if (idx == insert_num) {
+          double elapsed_final = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+          std::cout << "[Exp3] All " << insert_num << " updates completed in " << elapsed_final
+                    << "s (target duration: " << duration_sec << "s)" << std::endl;
+        }
         break;
-
-      TagT tag = static_cast<TagT>(idx + 2000000);
-      index.insert(insert_data + idx * data_dim, tag);
-
-      // FreshDiskANN模式: 周期性合并
-      if (system_type == FRESH_DISKANN && idx % MERGE_INTERVAL == MERGE_INTERVAL - 1) {
-        index.final_merge(NUM_SEARCH_THREADS / 2);
       }
+
+      TagT tag = static_cast<TagT>(base_tag_offset + idx);
+      index.insert(insert_data + idx * data_dim, tag);
 
       if (duration_sec > 0 && insert_rate > 0) {
         while (!stop_test.load()) {
@@ -596,6 +631,13 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
           }
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+      }
+    }
+
+    // For FreshDiskANN, wait for any ongoing reorganization to complete before exiting
+    if (system_type == FRESH_DISKANN) {
+      while (index.is_reorganizing()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
       }
     }
   };
@@ -638,8 +680,9 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
       get_memory_usage(rss_kb, vm_kb);
       double disk_mb = static_cast<double>(get_disk_usage_bytes(index._disk_index_prefix_in)) / (1024.0 * 1024.0);
 
+      int reorg_running = index.is_reorganizing() ? 1 : 0;
       ofs << system_names[system_type] << "," << elapsed_sec << "," << search_qps << "," << p99_lat << "," << inserts
-          << "," << insert_tput << "," << (rss_kb / 1024.0) << "," << disk_mb << "\n";
+          << "," << insert_tput << "," << (rss_kb / 1024.0) << "," << disk_mb << "," << reorg_running << "\n";
       ofs.flush();
 
       if ((duration_sec > 0 && elapsed_sec >= duration_sec) || inserts >= insert_num) {
@@ -653,6 +696,28 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
   for (auto &t : insert_threads) {
     t.join();
   }
+
+  // All insert threads completed - wait for any final operations to complete
+  if (system_type == FRESH_DISKANN) {
+    uint64_t final_inserts = insert_count.load();
+    if (final_inserts > 0 && (final_inserts % MERGE_INTERVAL) != 0) {
+      std::cout << "[Exp3] Requesting final merge for FreshDiskANN at " << final_inserts << " inserts" << std::endl;
+      index.request_merge_async(NUM_SEARCH_THREADS / 2);
+      index.wait_merge();
+    }
+    index.wait_merge();
+    std::cout << "[Exp3] Waiting for FreshDiskANN reorganization to complete..." << std::endl;
+    while (index.is_reorganizing()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    std::cout << "[Exp3] FreshDiskANN reorganization completed." << std::endl;
+  }
+
+  double final_elapsed = timer.elapsed() / 1e6;
+  uint64_t final_insert_count = insert_count.load();
+  std::cout << "[Exp3] Insert threads completed. Total inserts: " << final_insert_count << "/" << insert_num
+            << ", elapsed: " << final_elapsed << "s" << std::endl;
+
   stop_test.store(true);
 
   for (auto &t : search_threads) {
@@ -663,6 +728,292 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
   ofs.close();
 
   std::cout << "[" << system_names[system_type] << "] Concurrent test completed" << std::endl;
+}
+
+/**
+ * 实验1: 搜索延迟+更新并发 (动态调整L值以达到目标召回率)
+ *
+ * 核心改进：
+ * 1. 使用自适应L值调整策略，根据当前recall动态调整搜索参数
+ * 2. 当recall稳定在目标附近时，记录有效的性能指标
+ * 3. 支持L值的上下限约束，避免极端值
+ */
+template<typename T, typename TagT = uint32_t>
+void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *query_data, unsigned *gt_ids,
+                                   float *gt_dists, size_t query_num, size_t gt_dim, T *insert_data, size_t insert_num,
+                                   size_t data_dim, uint64_t recall_at, uint64_t L_init, uint32_t beam_width,
+                                   double duration_sec, double insert_rate, double target_recall, uint64_t L_min,
+                                   uint64_t L_max, uint64_t L_step, SystemType system_type,
+                                   const std::string &output_file) {
+  std::ofstream ofs(output_file, std::ios::app);
+  if (ofs.tellp() == 0) {
+    ofs << "system,time_sec,L,recall_at,recall_target,recall_pct,search_qps,p50_lat_us,p90_lat_us,p99_lat_us,"
+           "mean_ios,memory_rss_mb,disk_usage_mb,reorg_running\n";
+  }
+
+  // L值动态调整参数 (使用传入的参数)
+  const uint64_t L_MIN = L_min;             // L最小值
+  const uint64_t L_MAX = L_max;             // L最大值
+  const uint64_t L_STEP = L_step;           // 每次调整步长
+  constexpr double RECALL_TOLERANCE = 2.0;  // 召回率容忍度（±2%）
+  constexpr int STABLE_THRESHOLD = 3;       // 稳定判定所需的连续采样次数
+
+  // 动态L值（原子变量，可被搜索线程安全读取）
+  // 使用传入的L_init作为初始值（建议设置为500）
+  std::atomic<uint64_t> current_L(L_init);
+  int stable_count = 0;  // 连续稳定的采样次数
+
+  std::atomic<uint64_t> query_index(0);
+  std::atomic<uint64_t> interval_queries(0);
+  std::atomic<uint64_t> interval_recall_sum(0);
+  std::atomic<uint64_t> interval_ios_sum(0);
+  std::atomic<uint64_t> insert_count(0);
+  std::atomic<bool> stop_test(false);
+  uint64_t base_tag_offset = 0;
+  if (index._disk_index != nullptr) {
+    base_tag_offset = index._disk_index->num_points;
+  }
+
+#ifdef PIPEANN_TEST_HOOKS
+  const char *force_merge_env = std::getenv("PIPEANN_EXP1_FORCE_MERGE_AT");
+  uint64_t force_merge_at = force_merge_env ? std::stoull(force_merge_env) : 0;
+  std::atomic<bool> force_merge_triggered(false);
+#endif
+
+  std::vector<double> search_latencies;
+  std::mutex lat_mutex;
+
+  pipeann::Timer timer;
+  auto start_time = std::chrono::steady_clock::now();
+  auto last_sample = std::chrono::steady_clock::now();
+
+  auto search_func = [&]() {
+    while (!stop_test.load()) {
+      uint64_t idx = query_index.fetch_add(1);
+      if (idx >= query_num) {
+        query_index.store(0);
+        idx = 0;
+      }
+
+      // 使用当前动态L值
+      uint64_t L_now = current_L.load();
+
+      TagT result_tags[recall_at];
+      float result_dists[recall_at];
+      pipeann::QueryStats stats;
+
+      auto qs = std::chrono::high_resolution_clock::now();
+      index.search(query_data + idx * data_dim, recall_at, 0, L_now, beam_width, result_tags, result_dists, &stats,
+                   true);
+      auto qe = std::chrono::high_resolution_clock::now();
+
+      double lat_us = std::chrono::duration<double>(qe - qs).count() * 1e6;
+      double recall_pct =
+          pipeann::calculate_recall(1, gt_ids + idx * gt_dim, gt_dists + idx * gt_dim, static_cast<unsigned>(gt_dim),
+                                    result_tags, static_cast<unsigned>(recall_at), static_cast<unsigned>(recall_at));
+
+      interval_queries.fetch_add(1);
+      interval_recall_sum.fetch_add(static_cast<uint64_t>(recall_pct * 1000.0));
+      interval_ios_sum.fetch_add(static_cast<uint64_t>(stats.n_ios * 1000.0));
+
+      {
+        std::lock_guard<std::mutex> lock(lat_mutex);
+        search_latencies.push_back(lat_us);
+      }
+    }
+  };
+
+  auto insert_func = [&]() {
+    while (!stop_test.load()) {
+      double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+      if (duration_sec > 0 && elapsed >= duration_sec) {
+        stop_test.store(true);
+        break;
+      }
+      uint64_t idx = insert_count.fetch_add(1);
+      if (idx >= insert_num) {
+        // All inserts completed, log and exit
+        if (idx == insert_num) {
+          double elapsed_final = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+          std::cout << "[Exp1] All " << insert_num << " updates completed in " << elapsed_final
+                    << "s (target duration: " << duration_sec << "s)" << std::endl;
+        }
+        break;
+      }
+
+      TagT tag = static_cast<TagT>(base_tag_offset + idx);
+      index.insert(insert_data + idx * data_dim, tag);
+
+#ifdef PIPEANN_TEST_HOOKS
+      if (system_type == FRESH_DISKANN && force_merge_at > 0 && idx + 1 >= force_merge_at) {
+        if (!force_merge_triggered.exchange(true)) {
+          std::cout << "[Exp1][TEST] Triggering background merge at insert " << (idx + 1) << std::endl;
+          index.request_merge_async(NUM_SEARCH_THREADS / 2);
+        }
+      }
+#endif
+
+      if (duration_sec > 0 && insert_rate > 0) {
+        while (!stop_test.load()) {
+          double elapsed_now = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+          if (elapsed_now >= duration_sec) {
+            stop_test.store(true);
+            break;
+          }
+          double expected = insert_rate * elapsed_now;
+          if (static_cast<double>(insert_count.load()) <= expected) {
+            break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }
+    }
+
+    // For FreshDiskANN, wait for any ongoing reorganization to complete before exiting
+    if (system_type == FRESH_DISKANN) {
+      while (index.is_reorganizing()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+    }
+  };
+
+  std::vector<std::thread> search_threads;
+  for (int i = 0; i < NUM_SEARCH_THREADS; i++) {
+    search_threads.emplace_back(search_func);
+  }
+
+  std::vector<std::thread> insert_threads;
+  for (int i = 0; i < NUM_INSERT_THREADS; i++) {
+    insert_threads.emplace_back(insert_func);
+  }
+
+  std::thread monitor([&]() {
+    bool first_log = true;
+    while (!stop_test.load()) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      auto now = std::chrono::steady_clock::now();
+      double interval_sec = std::chrono::duration<double>(now - last_sample).count();
+      last_sample = now;
+
+      uint64_t queries = interval_queries.exchange(0);
+      uint64_t recall_sum = interval_recall_sum.exchange(0);
+      uint64_t ios_sum = interval_ios_sum.exchange(0);
+
+      double recall_pct = 0.0;
+      double mean_ios = 0.0;
+      if (queries > 0) {
+        recall_pct = (static_cast<double>(recall_sum) / 1000.0) / static_cast<double>(queries);
+        mean_ios = (static_cast<double>(ios_sum) / 1000.0) / static_cast<double>(queries);
+      }
+
+      // ========= 动态调整L值以达到目标召回率 =========
+      uint64_t L_now = current_L.load();
+      double recall_diff = recall_pct - target_recall;
+
+      if (queries > 0) {
+        if (recall_diff < -RECALL_TOLERANCE) {
+          // 当前recall低于目标，增加L值
+          uint64_t new_L = std::min(L_now + L_STEP, L_MAX);
+          if (new_L != L_now) {
+            current_L.store(new_L);
+            stable_count = 0;
+            if (first_log) {
+              std::cout << "[Exp1] Recall " << recall_pct << "% < target " << target_recall
+                        << "%, increasing L: " << L_now << " -> " << new_L << std::endl;
+            }
+          }
+        } else if (recall_diff > RECALL_TOLERANCE) {
+          // 当前recall高于目标，减小L值以降低延迟
+          uint64_t new_L = (L_now > L_MIN + L_STEP) ? (L_now - L_STEP) : L_MIN;
+          if (new_L != L_now) {
+            current_L.store(new_L);
+            stable_count = 0;
+            if (first_log) {
+              std::cout << "[Exp1] Recall " << recall_pct << "% > target " << target_recall
+                        << "%, decreasing L: " << L_now << " -> " << new_L << std::endl;
+            }
+          }
+        } else {
+          // 召回率在目标范围内，增加稳定计数
+          stable_count++;
+          if (stable_count == STABLE_THRESHOLD && first_log) {
+            std::cout << "[Exp1] Recall stabilized at " << recall_pct << "% (target: " << target_recall
+                      << "%, L=" << L_now << ")" << std::endl;
+            first_log = false;
+          }
+        }
+      }
+      // ========= 动态调整结束 =========
+
+      double search_qps = (interval_sec > 0 && queries > 0) ? (queries / interval_sec) : 0.0;
+      double p50_lat = 0.0;
+      double p90_lat = 0.0;
+      double p99_lat = 0.0;
+      {
+        std::lock_guard<std::mutex> lock(lat_mutex);
+        if (!search_latencies.empty()) {
+          std::sort(search_latencies.begin(), search_latencies.end());
+          p50_lat = search_latencies[static_cast<size_t>(search_latencies.size() * 0.5)];
+          p90_lat = search_latencies[static_cast<size_t>(search_latencies.size() * 0.9)];
+          p99_lat = search_latencies[static_cast<size_t>(search_latencies.size() * 0.99)];
+          search_latencies.clear();
+        }
+      }
+
+      double rss_kb, vm_kb;
+      get_memory_usage(rss_kb, vm_kb);
+      double disk_mb = static_cast<double>(get_disk_usage_bytes(index._disk_index_prefix_in)) / (1024.0 * 1024.0);
+
+      int reorg_running = index.is_reorganizing() ? 1 : 0;
+      double elapsed_sec = timer.elapsed() / 1e6;
+
+      // 使用当前实际的L值而非初始L值
+      uint64_t L_current = current_L.load();
+      ofs << system_names[system_type] << "," << elapsed_sec << "," << L_current << "," << recall_at << ","
+          << target_recall << "," << recall_pct << "," << search_qps << "," << p50_lat << "," << p90_lat << ","
+          << p99_lat << "," << mean_ios << "," << (rss_kb / 1024.0) << "," << disk_mb << "," << reorg_running << "\n";
+      ofs.flush();
+
+      if (duration_sec > 0 && elapsed_sec >= duration_sec) {
+        stop_test.store(true);
+        break;
+      }
+    }
+  });
+
+  for (auto &t : insert_threads) {
+    t.join();
+  }
+
+  // All insert threads completed - wait a bit for any final operations to complete
+  if (system_type == FRESH_DISKANN) {
+    uint64_t final_inserts = insert_count.load();
+    if (final_inserts > 0 && (final_inserts % MERGE_INTERVAL) != 0) {
+      std::cout << "[Exp1] Requesting final merge for FreshDiskANN at " << final_inserts << " inserts" << std::endl;
+      index.request_merge_async(NUM_SEARCH_THREADS / 2);
+    }
+    index.wait_merge();
+    std::cout << "[Exp1] Waiting for FreshDiskANN reorganization to complete..." << std::endl;
+    while (index.is_reorganizing()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    std::cout << "[Exp1] FreshDiskANN reorganization completed." << std::endl;
+  }
+
+  double final_elapsed = timer.elapsed() / 1e6;
+  uint64_t final_insert_count = insert_count.load();
+  uint64_t final_L = current_L.load();
+  std::cout << "[Exp1] Insert threads completed. Total inserts: " << final_insert_count << "/" << insert_num
+            << ", elapsed: " << final_elapsed << "s, final L: " << final_L << std::endl;
+
+  // Now it's safe to stop the test
+  stop_test.store(true);
+
+  for (auto &t : search_threads) {
+    t.join();
+  }
+  monitor.join();
+  ofs.close();
 }
 
 template<typename T, typename TagT = uint32_t>
@@ -712,14 +1063,113 @@ void run_concurrent_exp(const std::string &index_prefix, const std::string &quer
   auto *dist_cmp = pipeann::get_distance_function<T>(metric);
   int search_mode = (system_type == DC_PDI) ? PIPE_SEARCH : BEAM_SEARCH;
 
+  bool use_buffered_updates = (system_type == FRESH_DISKANN);
+  size_t buffer_max_points = use_buffered_updates ? static_cast<size_t>(MERGE_INTERVAL) : 0;
   pipeann::DynamicSSDIndex<T, TagT> dyn_index(paras, index_prefix, index_prefix + "_merge", dist_cmp, metric,
-                                              search_mode, false);
+                                              search_mode, false, use_buffered_updates, buffer_max_points, 0,
+                                              BUILD_RAM_GB);
 
   double insert_rate = (duration_sec > 0) ? (static_cast<double>(insert_num) / duration_sec) : 0.0;
   compare_concurrent_performance<T, TagT>(dyn_index, query, insert_data, query_num, insert_num, query_dim, recall_at,
                                           L_disk, beam_width, duration_sec, insert_rate, system_type, output_file);
 
   delete[] query;
+  delete[] insert_data;
+  delete dist_cmp;
+}
+
+template<typename T, typename TagT = uint32_t>
+void run_search_update_latency_exp(const std::string &index_prefix, const std::string &query_file,
+                                   const std::string &gt_file, const std::string &insert_file, SystemType system_type,
+                                   uint64_t recall_at, const std::vector<uint64_t> &L_values, uint32_t beam_width,
+                                   double update_ratio, double duration_sec, double target_recall, uint64_t L_min,
+                                   uint64_t L_max, uint64_t L_step, const std::string &output_file) {
+  T *query = nullptr;
+  size_t query_num = 0, query_dim = 0;
+  pipeann::load_bin<T>(query_file, query, query_num, query_dim);
+  if (query_num == 0 || query_dim == 0) {
+    std::cerr << "Error: Query file metadata is invalid: " << query_file << std::endl;
+    delete[] query;
+    return;
+  }
+
+  unsigned *gt_ids = nullptr;
+  float *gt_dists = nullptr;
+  size_t gt_num = 0, gt_dim = 0;
+  if (!load_truthset_auto(gt_file, query_num, gt_ids, gt_dists, gt_num, gt_dim)) {
+    std::cerr << "Error: Failed to load ground truth file: " << gt_file << std::endl;
+    delete[] query;
+    delete[] gt_ids;
+    delete[] gt_dists;
+    return;
+  }
+  if (gt_num != query_num) {
+    std::cerr << "Error: Query count (" << query_num << ") does not match groundtruth count (" << gt_num << ")"
+              << std::endl;
+    delete[] query;
+    delete[] gt_ids;
+    delete[] gt_dists;
+    return;
+  }
+  if (gt_dim < recall_at) {
+    std::cerr << "Error: Groundtruth k (" << gt_dim << ") is smaller than recall@" << recall_at << "." << std::endl;
+    delete[] query;
+    delete[] gt_ids;
+    delete[] gt_dists;
+    return;
+  }
+
+  T *insert_data = nullptr;
+  size_t insert_num = 0, insert_dim = 0;
+  pipeann::load_bin<T>(insert_file, insert_data, insert_num, insert_dim);
+  if (insert_num == 0 || insert_dim == 0) {
+    std::cerr << "Error: Insert file metadata is invalid: " << insert_file << std::endl;
+    delete[] query;
+    delete[] gt_ids;
+    delete[] insert_data;
+    return;
+  }
+  if (insert_dim != query_dim) {
+    std::cerr << "Error: Insert dim (" << insert_dim << ") does not match query dim (" << query_dim << ")" << std::endl;
+    delete[] query;
+    delete[] gt_ids;
+    delete[] insert_data;
+    return;
+  }
+
+  if (update_ratio > 0.0 && update_ratio < 1.0) {
+    insert_num = static_cast<size_t>(insert_num * update_ratio);
+    if (insert_num == 0) {
+      std::cerr << "Error: update_ratio too small, no insertions to run." << std::endl;
+      delete[] query;
+      delete[] gt_ids;
+      delete[] insert_data;
+      return;
+    }
+  }
+
+  pipeann::Parameters paras;
+  uint64_t L_disk = L_values.empty() ? 100 : L_values.front();
+  paras.set(0, static_cast<uint32_t>(L_disk), 384, 1.2f, NUM_SEARCH_THREADS + NUM_INSERT_THREADS, true, beam_width);
+
+  pipeann::Metric metric = pipeann::Metric::L2;
+  auto *dist_cmp = pipeann::get_distance_function<T>(metric);
+  int search_mode = (system_type == DC_PDI) ? PIPE_SEARCH : BEAM_SEARCH;
+
+  bool use_buffered_updates = (system_type == FRESH_DISKANN);
+  size_t buffer_max_points = use_buffered_updates ? static_cast<size_t>(MERGE_INTERVAL) : 0;
+  pipeann::DynamicSSDIndex<T, TagT> dyn_index(paras, index_prefix, index_prefix + "_merge", dist_cmp, metric,
+                                              search_mode, false, use_buffered_updates, buffer_max_points, 0,
+                                              BUILD_RAM_GB);
+
+  double insert_rate = (duration_sec > 0) ? (static_cast<double>(insert_num) / duration_sec) : 0.0;
+  compare_search_update_latency<T, TagT>(dyn_index, query, gt_ids, gt_dists, query_num, gt_dim, insert_data, insert_num,
+                                         query_dim, recall_at, L_disk, beam_width, duration_sec, insert_rate,
+                                         target_recall, L_min, L_max, L_step, system_type, output_file);
+
+  delete[] query;
+  delete[] gt_ids;
+  delete[] gt_dists;
   delete[] insert_data;
   delete dist_cmp;
 }
@@ -749,8 +1199,11 @@ void run_update_throughput_exp(const std::string &index_prefix, const std::strin
   auto *dist_cmp = pipeann::get_distance_function<T>(metric);
   int search_mode = (system_type == DC_PDI) ? PIPE_SEARCH : BEAM_SEARCH;
 
+  bool use_buffered_updates = (system_type == FRESH_DISKANN);
+  size_t buffer_max_points = use_buffered_updates ? static_cast<size_t>(MERGE_INTERVAL) : 0;
   pipeann::DynamicSSDIndex<T, TagT> dyn_index(paras, index_prefix, index_prefix + "_merge", dist_cmp, metric,
-                                              search_mode, false);
+                                              search_mode, false, use_buffered_updates, buffer_max_points, 0,
+                                              BUILD_RAM_GB);
 
   if (dyn_index._disk_index != nullptr && dyn_index._disk_index->data_dim != insert_dim) {
     std::cerr << "Error: Insert dim (" << insert_dim << ") does not match index dim ("
@@ -760,9 +1213,7 @@ void run_update_throughput_exp(const std::string &index_prefix, const std::strin
     return;
   }
 
-  bool trigger_merge = (system_type == FRESH_DISKANN);
-  compare_update_throughput<T, TagT>(dyn_index, insert_data, insert_num, insert_dim, system_type, trigger_merge,
-                                     output_file);
+  compare_update_throughput<T, TagT>(dyn_index, insert_data, insert_num, insert_dim, system_type, output_file);
 
   delete[] insert_data;
   delete dist_cmp;
@@ -772,15 +1223,37 @@ void run_update_throughput_exp(const std::string &index_prefix, const std::strin
  * 主函数
  */
 int main(int argc, char **argv) {
+#ifdef USE_AVX512
+  if (!__builtin_cpu_supports("avx512f")) {
+    std::cerr << "Error: binary requires AVX-512 but CPU does not support it." << std::endl;
+    return -1;
+  }
+#endif
+#ifdef USE_AVX2
+  if (!__builtin_cpu_supports("avx2")) {
+    std::cerr << "Error: binary requires AVX2 but CPU does not support it." << std::endl;
+    return -1;
+  }
+#endif
   if (argc < 10) {
     std::cout << "Usage: " << argv[0] << " <data_type> <index_prefix> <query_file> <gt_file>"
               << " <insert_data_file> <system_type> <experiment_type>"
               << " <output_dir> <num_threads> [recall_at] [L_values...]"
-              << " [--exp3-duration-sec <sec>] [--exp3-update-ratio <ratio>]\n";
+              << " [--exp1-duration-sec <sec>] [--exp1-update-ratio <ratio>]"
+              << " [--exp1-target-recall <recall_pct>]"
+              << " [--exp1-L-min <min>] [--exp1-L-max <max>] [--exp1-L-step <step>]"
+              << " [--exp3-duration-sec <sec>] [--exp3-update-ratio <ratio>]"
+              << " [--build-ram-gb <gb>]\n";
     std::cout << "\nParameters:\n";
     std::cout << "  data_type: uint8/int8/float\n";
     std::cout << "  system_type: 0=DC-PDI, 1=IP-DiskANN, 2=FreshDiskANN\n";
     std::cout << "  experiment_type: 1=search_latency, 2=update_throughput, 3=concurrent\n";
+    std::cout << "  --exp1-duration-sec: fixed duration for experiment 1 (seconds)\n";
+    std::cout << "  --exp1-update-ratio: fraction of insert dataset to use in experiment 1\n";
+    std::cout << "  --exp1-target-recall: target recall@K percentage for reporting\n";
+    std::cout << "  --exp1-L-min: minimum L value for dynamic adjustment (default: 50)\n";
+    std::cout << "  --exp1-L-max: maximum L value for dynamic adjustment (default: 600)\n";
+    std::cout << "  --exp1-L-step: L value adjustment step size (default: 10)\n";
     std::cout << "  --exp3-duration-sec: fixed duration for experiment 3 (seconds)\n";
     std::cout << "  --exp3-update-ratio: fraction of insert dataset to use in experiment 3\n";
     return -1;
@@ -799,13 +1272,68 @@ int main(int argc, char **argv) {
 
   uint64_t recall_at = (argc > arg_no) ? atoi(argv[arg_no++]) : 10;
 
+  double exp1_duration_sec = 180.0;
+  double exp1_update_ratio = 1.0;
+  double exp1_target_recall = 90.0;
+  uint64_t exp1_L_min = 50;   // L动态调整最小值
+  uint64_t exp1_L_max = 600;  // L动态调整最大值
+  uint64_t exp1_L_step = 10;  // L动态调整步长
   double exp3_duration_sec = 120.0;
   double exp3_update_ratio = 1.0;
+  BUILD_RAM_GB = 32;
 
   std::vector<uint64_t> L_values;
   if (argc > arg_no) {
     for (int i = arg_no; i < argc; i++) {
       std::string arg(argv[i]);
+      if (arg.rfind("--exp1-duration-sec=", 0) == 0) {
+        exp1_duration_sec = std::stod(arg.substr(strlen("--exp1-duration-sec=")));
+        continue;
+      }
+      if (arg == "--exp1-duration-sec" && i + 1 < argc) {
+        exp1_duration_sec = std::stod(argv[++i]);
+        continue;
+      }
+      if (arg.rfind("--exp1-update-ratio=", 0) == 0) {
+        exp1_update_ratio = std::stod(arg.substr(strlen("--exp1-update-ratio=")));
+        continue;
+      }
+      if (arg == "--exp1-update-ratio" && i + 1 < argc) {
+        exp1_update_ratio = std::stod(argv[++i]);
+        continue;
+      }
+      if (arg.rfind("--exp1-target-recall=", 0) == 0) {
+        exp1_target_recall = std::stod(arg.substr(strlen("--exp1-target-recall=")));
+        continue;
+      }
+      if (arg == "--exp1-target-recall" && i + 1 < argc) {
+        exp1_target_recall = std::stod(argv[++i]);
+        continue;
+      }
+      if (arg.rfind("--exp1-L-min=", 0) == 0) {
+        exp1_L_min = std::stoull(arg.substr(strlen("--exp1-L-min=")));
+        continue;
+      }
+      if (arg == "--exp1-L-min" && i + 1 < argc) {
+        exp1_L_min = std::stoull(argv[++i]);
+        continue;
+      }
+      if (arg.rfind("--exp1-L-max=", 0) == 0) {
+        exp1_L_max = std::stoull(arg.substr(strlen("--exp1-L-max=")));
+        continue;
+      }
+      if (arg == "--exp1-L-max" && i + 1 < argc) {
+        exp1_L_max = std::stoull(argv[++i]);
+        continue;
+      }
+      if (arg.rfind("--exp1-L-step=", 0) == 0) {
+        exp1_L_step = std::stoull(arg.substr(strlen("--exp1-L-step=")));
+        continue;
+      }
+      if (arg == "--exp1-L-step" && i + 1 < argc) {
+        exp1_L_step = std::stoull(argv[++i]);
+        continue;
+      }
       if (arg.rfind("--exp3-duration-sec=", 0) == 0) {
         exp3_duration_sec = std::stod(arg.substr(strlen("--exp3-duration-sec=")));
         continue;
@@ -822,11 +1350,20 @@ int main(int argc, char **argv) {
         exp3_update_ratio = std::stod(argv[++i]);
         continue;
       }
+      if (arg.rfind("--build-ram-gb=", 0) == 0) {
+        BUILD_RAM_GB = static_cast<uint32_t>(std::stoul(arg.substr(strlen("--build-ram-gb="))));
+        continue;
+      }
+      if (arg == "--build-ram-gb" && i + 1 < argc) {
+        BUILD_RAM_GB = static_cast<uint32_t>(std::stoul(argv[++i]));
+        continue;
+      }
       L_values.push_back(atoi(argv[i]));
     }
   }
   if (L_values.empty()) {
-    L_values = {100, 200, 300, 400, 500};
+    // 默认以500作为初始L值，这是经过测试的合理值
+    L_values = {500, 400, 300, 200, 100};
   }
 
   std::cout << "Running comparison experiment for " << system_names[system_type] << std::endl;
@@ -841,14 +1378,17 @@ int main(int argc, char **argv) {
                          ".csv";
 
     if (data_type == "uint8") {
-      compare_search_latency<uint8_t, uint32_t>(index_prefix, query_file, gt_file, num_threads,
-                                                (SystemType) system_type, recall_at, L_values, 4, output);
+      run_search_update_latency_exp<uint8_t, uint32_t>(
+          index_prefix, query_file, gt_file, insert_file, (SystemType) system_type, recall_at, L_values, 4,
+          exp1_update_ratio, exp1_duration_sec, exp1_target_recall, exp1_L_min, exp1_L_max, exp1_L_step, output);
     } else if (data_type == "int8") {
-      compare_search_latency<int8_t, uint32_t>(index_prefix, query_file, gt_file, num_threads, (SystemType) system_type,
-                                               recall_at, L_values, 4, output);
+      run_search_update_latency_exp<int8_t, uint32_t>(
+          index_prefix, query_file, gt_file, insert_file, (SystemType) system_type, recall_at, L_values, 4,
+          exp1_update_ratio, exp1_duration_sec, exp1_target_recall, exp1_L_min, exp1_L_max, exp1_L_step, output);
     } else if (data_type == "float") {
-      compare_search_latency<float, uint32_t>(index_prefix, query_file, gt_file, num_threads, (SystemType) system_type,
-                                              recall_at, L_values, 4, output);
+      run_search_update_latency_exp<float, uint32_t>(
+          index_prefix, query_file, gt_file, insert_file, (SystemType) system_type, recall_at, L_values, 4,
+          exp1_update_ratio, exp1_duration_sec, exp1_target_recall, exp1_L_min, exp1_L_max, exp1_L_step, output);
     } else {
       std::cerr << "Unsupported data type: " << data_type << std::endl;
       return -1;

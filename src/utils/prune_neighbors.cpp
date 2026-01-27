@@ -241,11 +241,15 @@ namespace pipeann {
   }
 
   /**
-   * DC-PDI: 块感知邻居剪枝（论文4.2节）
+   * DC-PDI优化v4: 块感知邻居剪枝（论文4.2节）
    * 
-   * 对跨页边应用惩罚系数，优先保留页内边
-   * d'(v_new, u) = d(v_new, u) * β  if Page(u) ≠ Page(v_new)
-   *              = d(v_new, u)      otherwise
+   * 新策略：不修改距离，而是在相同距离时优先选择同页邻居
+   * 原因：即使1.05的惩罚也会影响图质量，导致召回率下降
+   * 
+   * 优化策略：
+   * 1. 保持原始距离不变，确保图质量
+   * 2. 在occlude_list中使用自定义比较器，同距离时优先同页
+   * 3. 作为最终的tie-breaker，对图质量影响最小
    */
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::prune_neighbors_block_aware(
@@ -256,21 +260,38 @@ namespace pipeann {
     
     if (pool.empty()) return;
     
-    // 跨页惩罚系数
-    constexpr float kCrossPagePenalty = 1.5f;
-    
-    // 应用块感知惩罚调整距离
-    std::vector<float> original_distances(pool.size());
-    for (size_t i = 0; i < pool.size(); i++) {
-      original_distances[i] = pool[i].distance;
-      uint64_t nbr_page = node_sector_no(pool[i].id);
-      if (nbr_page != target_page) {
-        pool[i].distance *= kCrossPagePenalty;
-      }
-    }
-    
-    // 重新排序
+    // 首先对pool排序
     std::sort(pool.begin(), pool.end());
+    
+    // DC-PDI优化v4: 使用极小的epsilon作为tie-breaker
+    // 只有在距离差异小于epsilon时才考虑页面局部性
+    constexpr float kEpsilon = 1e-6f;
+    
+    // 对距离相近的候选进行重排序：同页优先
+    // 使用稳定排序保持原有相对顺序
+    const size_t pool_size = pool.size();
+    const size_t process_count = std::min(pool_size, static_cast<size_t>(maxc));
+    
+    // DC-PDI优化v4: 使用lambda进行局部重排
+    // 对于距离差异在epsilon内的连续段，将同页邻居排在前面
+    for (size_t i = 0; i < process_count; ) {
+      // 找到距离相近的段
+      size_t j = i + 1;
+      float base_dist = pool[i].distance;
+      while (j < process_count && (pool[j].distance - base_dist) < kEpsilon * base_dist) {
+        ++j;
+      }
+      
+      // 如果段长度大于1，在段内将同页邻居移到前面
+      if (j - i > 1) {
+        // 使用stable_partition保持同页和跨页各自的相对顺序
+        std::stable_partition(pool.begin() + i, pool.begin() + j, 
+          [this, target_page](const Neighbor& nbr) {
+            return node_sector_no(nbr.id) == target_page;
+          });
+      }
+      i = j;
+    }
     
     // 使用原有剪枝逻辑
     std::vector<Neighbor> result;
@@ -280,7 +301,7 @@ namespace pipeann {
     
     pruned_list.clear();
     
-    // 恢复原始距离并填充结果
+    // 填充结果
     size_t medoid_threshold = result.size() * 3 / 4;
     for (size_t i = 0; i < result.size(); ++i) {
       if (i > medoid_threshold && result[i].id == medoid) {
@@ -297,15 +318,14 @@ namespace pipeann {
         }
       }
     }
-    
-    // 恢复pool中的原始距离（以便调用者使用）
-    for (size_t i = 0; i < pool.size() && i < original_distances.size(); i++) {
-      pool[i].distance = original_distances[i];
-    }
   }
 
   /**
    * DC-PDI: 块感知PQ邻居剪枝（论文4.2节）
+   * 优化v2: 
+   * - 降低惩罚系数到1.1
+   * - 只处理前maxc个候选
+   * - 移除不必要的距离恢复
    */
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::prune_neighbors_pq_block_aware(
@@ -316,13 +336,15 @@ namespace pipeann {
     
     if (pool.empty()) return;
     
-    // 跨页惩罚系数
-    constexpr float kCrossPagePenalty = 1.5f;
+    // DC-PDI优化v2: 降低惩罚系数
+    constexpr float kCrossPagePenalty = 1.1f;
     
-    // 保存原始距离并应用惩罚
-    std::vector<float> original_distances(pool.size());
-    for (size_t i = 0; i < pool.size(); i++) {
-      original_distances[i] = pool[i].distance;
+    const size_t pool_size = pool.size();
+    
+    // DC-PDI优化v2: 只处理前maxc个候选
+    const size_t process_count = std::min(pool_size, static_cast<size_t>(maxc));
+    
+    for (size_t i = 0; i < process_count; i++) {
       uint64_t nbr_page = node_sector_no(pool[i].id);
       if (nbr_page != target_page) {
         pool[i].distance *= kCrossPagePenalty;
@@ -353,10 +375,7 @@ namespace pipeann {
       }
     }
     
-    // 恢复原始距离
-    for (size_t i = 0; i < pool.size() && i < original_distances.size(); i++) {
-      pool[i].distance = original_distances[i];
-    }
+    // DC-PDI优化v2: 不恢复距离，节省开销
   }
 
   template class SSDIndex<float>;

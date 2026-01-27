@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <filesystem>
 
+#ifdef ENABLE_DISPERSION_MONITOR
+#include "utils/dispersion_monitor.h"
+#endif
+
 #include <omp.h>
 #include <chrono>
 #include <cmath>
@@ -21,13 +25,30 @@
 #include <sys/syscall.h>
 #include "linux_aligned_file_reader.h"
 
+#ifdef ENABLE_DISPERSION_MONITOR
+#include <cstdlib>
+#endif
+
 #ifdef ENABLE_BLOCK_AWARE_PRUNE
 #include "utils/clustering.h"
 #endif
 
 namespace pipeann {
+#ifdef ENABLE_DISPERSION_MONITOR
+  namespace {
+    bool env_disables_dispersion_monitor() {
+      static const bool disabled = []() {
+        const char *value = std::getenv("PIPEANN_DISABLE_DISPERSION_MONITOR");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+      }();
+      return disabled;
+    }
+  }  // namespace
+#endif
+
   template<typename T, typename TagT>
   int SSDIndex<T, TagT>::insert_in_place(const T *point1, const TagT &tag, tsl::robin_set<uint32_t> *deletion_set) {
+    std::shared_lock lk(merge_lock);
     if (unlikely(size_per_io != SECTOR_LEN)) {
       LOG(ERROR) << "Insert not supported for size_per_io == " << size_per_io;
     }
@@ -41,38 +62,36 @@ namespace pipeann {
     // write neighbor (e.g., PQ).
     nbr_handler->insert(point, target_id);
 
+    // DC-PDI优化控制：检查是否为DC-PDI模式（PIPE_SEARCH = 2）
+    // 在函数开始处声明一次，避免重复声明错误
+    const bool is_dcpdi = (this->get_search_mode() == PIPE_SEARCH);
+
     std::vector<Neighbor> exp_node_info;
     tsl::robin_map<uint32_t, T *> coord_map;
-    coord_map.reserve(10 * this->l_index);
+    // DC-PDI内存优化：减少coord_map和coord_buf的预分配大小
+    // 实际上搜索过程中访问的节点数量通常不会超过3*l_index
+    // 原来使用10*l_index是过于保守的估计
+    const size_t coord_buf_capacity = 3 * this->l_index;
+    coord_map.reserve(coord_buf_capacity);
     // Dynamic alloc and not using MAX_N_CMPS to reduce memory footprint.
     T *coord_buf = nullptr;
-    alloc_aligned((void **) &coord_buf, 10 * this->l_index * this->aligned_dim, 256);
+    alloc_aligned((void **) &coord_buf, coord_buf_capacity * this->aligned_dim * sizeof(T), 256);
     std::vector<uint64_t> page_ref{};
     // re-normalize point1 to support inner_product search (it adds one more dimension, so not idempotent).
     this->do_beam_search(point1, 0, l_index, beam_width, exp_node_info, &coord_map, coord_buf, nullptr, deletion_set,
                          false, &page_ref);
     std::vector<uint32_t> new_nhood;
-    
-    // DC-PDI: 使用块感知剪枝（论文4.2节）
-    // 确定目标页面（使用连接强度最高的页面）
+
+    // DC-PDI优化v4: 块感知剪枝（论文4.2节）
+    // 优化点：
+    // 1. 降低阈值到4个邻居即可启用
+    // 2. 使用最简单的策略：选择最近邻所在页面作为目标页面
+    // 3. 只有在DC-PDI模式（PIPE_SEARCH）下才启用，确保不影响IP-DiskANN/FreshDiskANN
 #ifdef ENABLE_BLOCK_AWARE_PRUNE
-    uint64_t target_page = 0;
-    if (!page_ref.empty()) {
-      // 计算各页面的连接强度并选择最优页面
-      std::unordered_map<uint64_t, float> page_strength;
-      constexpr float kDistanceDecay = 1.5f;
-      for (auto& nbr : exp_node_info) {
-        uint64_t page = node_sector_no(nbr.id);
-        float dist = std::max(nbr.distance, 1e-6f);
-        page_strength[page] += 1.0f / std::pow(dist, kDistanceDecay);
-      }
-      float max_strength = 0;
-      for (auto& [page, strength] : page_strength) {
-        if (strength > max_strength) {
-          max_strength = strength;
-          target_page = page;
-        }
-      }
+    const size_t min_neighbors_for_block_aware = 4;
+    if (is_dcpdi && !page_ref.empty() && exp_node_info.size() >= min_neighbors_for_block_aware) {
+      // DC-PDI优化v4: 直接使用最近邻（第一个）所在页面作为目标页面
+      uint64_t target_page = node_sector_no(exp_node_info[0].id);
       prune_neighbors_block_aware(coord_map, exp_node_info, new_nhood, target_page);
     } else {
       prune_neighbors(coord_map, exp_node_info, new_nhood);
@@ -100,22 +119,39 @@ namespace pipeann {
     cur_loc++;  // for target ID, atomic update.
     set_loc2id(target_id, target_id);
 #else
-    // DC-PDI: 使用聚类感知位置分配（论文3.2节）
-    // 根据邻居的距离计算连接强度，选择最优页面
-    std::vector<float> neighbor_dists;
-    neighbor_dists.reserve(new_nhood.size());
-    for (auto& nbr_id : new_nhood) {
-      // 从exp_node_info中找到对应邻居的距离
-      float dist = std::numeric_limits<float>::max();
-      for (auto& info : exp_node_info) {
-        if (info.id == nbr_id) {
-          dist = info.distance;
-          break;
+    // DC-PDI优化v3: 使用聚类感知位置分配（论文3.2节）
+    // 只有在DC-PDI模式（PIPE_SEARCH）下才启用，确保不影响IP-DiskANN/FreshDiskANN
+    std::vector<uint64_t> locs;
+    if (is_dcpdi) {
+      // DC-PDI模式：使用聚类感知位置分配
+      std::vector<float> neighbor_dists;
+      neighbor_dists.reserve(new_nhood.size());
+
+      // 预构建ID到距离的映射表
+      tsl::robin_map<uint32_t, float> id_to_dist;
+      id_to_dist.reserve(exp_node_info.size());
+      for (auto &info : exp_node_info) {
+        id_to_dist[info.id] = info.distance;
+      }
+
+      for (auto &nbr_id : new_nhood) {
+        auto it = id_to_dist.find(nbr_id);
+        if (it != id_to_dist.end()) {
+          neighbor_dists.push_back(it->second);
+        } else {
+          neighbor_dists.push_back(std::numeric_limits<float>::max());
         }
       }
-      neighbor_dists.push_back(dist);
+      locs = this->alloc_loc_clustering_aware(new_nhood.size() + 1, new_nhood, neighbor_dists, pages_need_to_read);
+    } else {
+      // Baseline模式（IP-DiskANN/FreshDiskANN）：使用标准位置分配
+      std::set<uint64_t> hint_pages;
+      for (auto &nbr : new_nhood) {
+        hint_pages.insert(node_sector_no(nbr));
+      }
+      std::vector<uint64_t> hint_pages_vec(hint_pages.begin(), hint_pages.end());
+      locs = this->alloc_loc(new_nhood.size() + 1, hint_pages_vec, pages_need_to_read);
     }
-    auto locs = this->alloc_loc_clustering_aware(new_nhood.size() + 1, new_nhood, neighbor_dists, pages_need_to_read);
 #endif
 
     std::set<uint64_t> pages_to_rmw_set;
@@ -134,10 +170,16 @@ namespace pipeann {
     // re-read the candidate pages (mostly in the cache).
     std::unordered_map<uint32_t, char *> page_buf_map;
 
-    // dynamically allocate update_buf to reduce memory footprint.
-    // 2x MAX_N_EDGES for read + write, the update_buf is freed in bg_io_thread.
+    // DC-PDI内存优化：动态计算实际需要的缓冲区大小
+    // 实际需要：new_nhood.size()（读取邻居页面）+ pages_to_rmw.size()（写入页面）
+    // 添加额外1个用于目标节点，并向上取整到2的幂次方便对齐
+    const size_t actual_pages_needed = new_nhood.size() + pages_to_rmw.size() + 1;
+    // 限制最大分配大小，避免极端情况下的内存爆炸
+    // 通常range是96-128，所以实际需求约256页，远小于2*MAX_N_EDGES=2048
+    const size_t max_pages = std::min(actual_pages_needed, static_cast<size_t>(2 * this->range + 16));
+
     assert(read_data->update_buf == nullptr);
-    pipeann::alloc_aligned((void **) &read_data->update_buf, (2 * MAX_N_EDGES + 1) * size_per_io, SECTOR_LEN);
+    pipeann::alloc_aligned((void **) &read_data->update_buf, max_pages * size_per_io, SECTOR_LEN);
     auto &update_buf = read_data->update_buf;
 
     std::vector<IORequest> reads, writes_4k, writes;
@@ -190,7 +232,8 @@ namespace pipeann {
     for (uint32_t i = 0; i < new_nhood.size(); ++i) {
       auto r_sector = node_sector_no(new_nhood[i]);
       if (page_buf_map.find(r_sector) == page_buf_map.end()) {
-        LOG(ERROR) << new_nhood[i] << " " << "Sector " << r_sector << " not found in page_buf_map";
+        LOG(ERROR) << new_nhood[i] << " "
+                   << "Sector " << r_sector << " not found in page_buf_map";
         exit(-1);
       }
       auto r_node_buf = offset_to_node(page_buf_map[r_sector], new_nhood[i]);
@@ -239,6 +282,33 @@ namespace pipeann {
     std::vector<uint64_t> write_page_ref;
     reader->wbc_write(writes, ctx, &write_page_ref);
 
+#ifdef ENABLE_DISPERSION_MONITOR
+    // DC-PDI物理离散度统计收集（论文3.3节）
+    // 采样策略：每kSampleRate次插入采样一次，避免性能影响
+    // 计算目标节点的物理离散度：邻居在不同页面上的数量
+    if (!env_disables_dispersion_monitor()) {
+      static thread_local uint32_t insert_counter = 0;
+      if (++insert_counter >= DispersionMonitor::kSampleRate) {
+        insert_counter = 0;
+
+        // 目标节点的页面ID
+        uint64_t target_page = loc_sector_no(locs[new_nhood.size()]);
+
+        // 计算物理离散度：统计邻居中有多少在不同页面上
+        uint32_t cross_page_neighbors = 0;
+        for (size_t i = 0; i < new_nhood.size(); ++i) {
+          uint64_t nbr_page = loc_sector_no(locs[i]);
+          if (nbr_page != target_page) {
+            ++cross_page_neighbors;
+          }
+        }
+
+        // 更新统计
+        dispersion_monitor_.update_dispersion(target_page, cross_page_neighbors);
+      }
+    }
+#endif
+
 #ifndef IN_PLACE_RECORD_UPDATE
     // update locs
     // no concurrency issue for target_id (as it can be only inserted).
@@ -274,6 +344,10 @@ namespace pipeann {
       bg_tasks.push_notify_all();
     } else {
       v2::unlockReqs(this->page_lock_table, pages_locked);
+      // Fix: Free update_buf and return query buffer when page_ref is empty
+      aligned_free(read_data->update_buf);
+      read_data->update_buf = nullptr;
+      this->push_query_buf(read_data);
     }
     reader->deref(&page_ref, ctx);
 #else

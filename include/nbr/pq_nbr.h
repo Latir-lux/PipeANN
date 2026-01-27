@@ -31,18 +31,34 @@ namespace pipeann {
     }
 
     // rev_id_map: new_id -> old_id.
+    // Note: This function is called while holding SSDIndex::merge_lock exclusively,
+    // so no concurrent insert/search operations can access this->data or pq_table.
     AbstractNeighbor<T> *shuffle(const libcuckoo::cuckoohash_map<uint32_t, uint32_t> &rev_id_map, uint64_t new_npoints,
                                  uint32_t nthreads) {
       AbstractNeighbor<T> *abs_nbr_handler;
       PQNeighbor<T> *pq_nbr_handler = new PQNeighbor<T>();
       abs_nbr_handler = pq_nbr_handler;
 
-      pq_nbr_handler->data.resize(new_npoints * this->pq_table.n_chunks);
+      const uint64_t n_chunks = this->pq_table.n_chunks;
+      const uint64_t src_data_size = this->data.size();
+      const uint64_t max_old_id = src_data_size / n_chunks;
+      
+      pq_nbr_handler->data.resize(new_npoints * n_chunks);
 #pragma omp parallel for num_threads(nthreads)
       for (uint64_t i = 0; i < new_npoints; ++i) {
-        memcpy(pq_nbr_handler->data.data() + i * this->pq_table.n_chunks,
-               this->data.data() + rev_id_map.find(i) * this->pq_table.n_chunks, this->pq_table.n_chunks);
+        uint32_t old_id = 0;
+        if (!rev_id_map.find(i, old_id)) {
+          LOG(ERROR) << "Missing reverse mapping for new ID: " << i;
+          continue;
+        }
+        if (old_id >= max_old_id) {
+          LOG(ERROR) << "old_id " << old_id << " out of bounds (max: " << max_old_id << "), src_data_size: " << src_data_size << ", n_chunks: " << n_chunks;
+          continue;
+        }
+        memcpy(pq_nbr_handler->data.data() + i * n_chunks,
+               this->data.data() + old_id * n_chunks, n_chunks);
       }
+      
       pq_nbr_handler->pq_table = std::move(this->pq_table);
       pq_nbr_handler->npoints = new_npoints;
       return abs_nbr_handler;

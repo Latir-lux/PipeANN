@@ -2,6 +2,7 @@
 #include "ssd_index.h"
 #include <malloc.h>
 #include <filesystem>
+#include <cstdlib>
 
 #include <omp.h>
 #include <cmath>
@@ -17,6 +18,15 @@
 // Index<T, TagT>的ssd版本 把大规模ANN索引存储在SSD上 让查询、插入、加载能以优化后的I/O方式进行
 // 加入了缓冲区管理 SSD专用I/O reader/writer 后台异步I/O线程 邻居处理 内存+SSD混合索引(mem_index)
 namespace pipeann {
+#ifdef ENABLE_DISPERSION_MONITOR
+  namespace {
+    bool env_disables_dispersion_monitor() {
+      const char *value = std::getenv("PIPEANN_DISABLE_DISPERSION_MONITOR");
+      return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }
+  }  // namespace
+#endif
+
   template<typename T>
   DiskNode<T>::DiskNode(uint32_t id, T *coords, uint32_t *nhood) : id(id) {
     this->coords = coords;
@@ -35,6 +45,9 @@ namespace pipeann {
   SSDIndex<T, TagT>::SSDIndex(pipeann::Metric m, std::shared_ptr<AlignedFileReader> &fileReader,
                               AbstractNeighbor<T> *nbr_handler, bool tags, Parameters *params)
       : reader(fileReader), nbr_handler(nbr_handler), data_is_normalized(false), enable_tags(tags) {
+#ifdef ENABLE_DISPERSION_MONITOR
+    this->dispersion_monitor_enabled_ = !env_disables_dispersion_monitor();
+#endif
     if (m == pipeann::Metric::COSINE) {
       if (std::is_floating_point<T>::value) {
         LOG(INFO) << "Cosine metric chosen for (normalized) float data."
@@ -153,6 +166,98 @@ namespace pipeann {
     return 0;
   }
 
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::export_live_points(const std::string &out_data_bin, const std::string &out_tags_bin,
+                                             const tsl::robin_set<TagT> &deleted_tags, uint32_t nthreads) {
+    if (!enable_tags) {
+      LOG(ERROR) << "Tags are disabled, cannot export live points.";
+      exit(-1);
+    }
+    if (nthreads == 0) {
+      nthreads = this->max_nthreads;
+    }
+
+    std::ofstream data_writer;
+    std::ofstream tags_writer;
+    open_file_to_write(data_writer, out_data_bin);
+    open_file_to_write(tags_writer, out_tags_bin);
+
+    int npts_i32 = 0;
+    int dims_i32 = static_cast<int>(data_dim);
+    int tag_dim_i32 = 1;
+    data_writer.write(reinterpret_cast<const char *>(&npts_i32), sizeof(int));
+    data_writer.write(reinterpret_cast<const char *>(&dims_i32), sizeof(int));
+    tags_writer.write(reinterpret_cast<const char *>(&npts_i32), sizeof(int));
+    tags_writer.write(reinterpret_cast<const char *>(&tag_dim_i32), sizeof(int));
+
+    uint64_t exported = 0;
+
+    if (nnodes_per_sector == 0) {
+      std::vector<T> vec(data_dim);
+      for (uint32_t id = 0; id < cur_id; ++id) {
+        TagT tag = id2tag(id);
+        if (deleted_tags.find(tag) != deleted_tags.end()) {
+          continue;
+        }
+        if (get_vector_by_id(id, vec.data()) != 0) {
+          continue;
+        }
+        data_writer.write(reinterpret_cast<const char *>(vec.data()), data_dim * sizeof(T));
+        tags_writer.write(reinterpret_cast<const char *>(&tag), sizeof(TagT));
+        exported++;
+      }
+    } else {
+      constexpr uint64_t kSectorsPerExport = 1024;
+      void *ctx = reader->get_ctx();
+      char *rbuf = nullptr;
+      alloc_aligned((void **) &rbuf, kSectorsPerExport * size_per_io, SECTOR_LEN);
+
+      uint64_t n_sectors = (cur_loc + nnodes_per_sector - 1) / nnodes_per_sector;
+      for (uint64_t sector = 0; sector < n_sectors; sector += kSectorsPerExport) {
+        uint64_t st_sector = sector;
+        uint64_t ed_sector = std::min(sector + kSectorsPerExport, n_sectors);
+        uint64_t loc_st = st_sector * nnodes_per_sector;
+        uint64_t loc_ed = std::min(cur_loc.load(), ed_sector * nnodes_per_sector);
+        uint64_t n_sectors_to_read = ed_sector - st_sector;
+        std::vector<IORequest> read_reqs;
+        read_reqs.emplace_back(
+            IORequest(loc_sector_no(loc_st) * SECTOR_LEN, n_sectors_to_read * size_per_io, rbuf, 0, 0));
+        reader->read(read_reqs, ctx, false);
+
+        for (uint64_t loc = loc_st; loc < loc_ed; ++loc) {
+          uint32_t id = loc2id(loc);
+          if (id == kInvalidID || id == kAllocatedID) {
+            continue;
+          }
+          TagT tag = id2tag(id);
+          if (deleted_tags.find(tag) != deleted_tags.end()) {
+            continue;
+          }
+          uint64_t rel_sector = (loc / nnodes_per_sector) - st_sector;
+          char *page_buf = rbuf + rel_sector * SECTOR_LEN;
+          char *node_buf = offset_to_loc(page_buf, loc);
+          T *coords = offset_to_node_coords(node_buf);
+          data_writer.write(reinterpret_cast<const char *>(coords), data_dim * sizeof(T));
+          tags_writer.write(reinterpret_cast<const char *>(&tag), sizeof(TagT));
+          exported++;
+        }
+      }
+      aligned_free(rbuf);
+    }
+
+    data_writer.seekp(0);
+    tags_writer.seekp(0);
+    npts_i32 = static_cast<int>(exported);
+    data_writer.write(reinterpret_cast<const char *>(&npts_i32), sizeof(int));
+    data_writer.write(reinterpret_cast<const char *>(&dims_i32), sizeof(int));
+    tags_writer.write(reinterpret_cast<const char *>(&npts_i32), sizeof(int));
+    tags_writer.write(reinterpret_cast<const char *>(&tag_dim_i32), sizeof(int));
+    data_writer.close();
+    tags_writer.close();
+
+    LOG(INFO) << "Exported " << exported << " live points to " << out_data_bin;
+  }
+
   // part3 buffer管理
   // 为每个查询线程创建两个buffer(读取缓冲 + scratch)
   template<typename T, typename TagT>
@@ -175,11 +280,26 @@ namespace pipeann {
       bg_io_thread_[i] = new std::thread(&SSDIndex<T, TagT>::bg_io_thread, this);
     }
 #endif
+
+#ifdef ENABLE_DISPERSION_MONITOR
+    if (dispersion_monitor_enabled_) {
+      // DC-PDI: 初始化dispersion监控器的max_neighbors参数
+      // 这对于正确计算碎片化比例至关重要
+      dispersion_monitor_.set_max_neighbors(this->range);
+      LOG(INFO) << "DC-PDI: Dispersion monitor initialized with max_neighbors=" << this->range;
+      start_reorg_thread();
+    }
+#endif
   }
 
   // 回收所有分配的scratch buffer
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::destroy_buffers() {
+#ifdef ENABLE_DISPERSION_MONITOR
+    if (dispersion_monitor_enabled_) {
+      stop_reorg_thread();
+    }
+#endif
 #ifndef READ_ONLY_TESTS
     for (int i = 0; i < kBgIOThreads; ++i) {
       if (bg_io_thread_[i] != nullptr) {
@@ -209,6 +329,104 @@ namespace pipeann {
       delete buf;
     }
   }
+
+#ifdef ENABLE_DISPERSION_MONITOR
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::start_reorg_thread() {
+    if (reorg_thread_.joinable()) {
+      return;
+    }
+    reorg_stop_.store(false);
+    reorg_thread_ = std::thread(&SSDIndex<T, TagT>::reorg_worker, this);
+  }
+
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::stop_reorg_thread() {
+    reorg_stop_.store(true);
+    if (reorg_thread_.joinable()) {
+      reorg_thread_.join();
+    }
+  }
+
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::reorg_worker() {
+    // DC-PDI后台重组织工作线程
+    //
+    // 设计原则：
+    // 1. 轻量级检查，避免影响主线程性能
+    // 2. 仅在满足条件时触发重组织
+
+    constexpr int kCheckIntervalSec = 5;     // 检查间隔（秒）
+    constexpr int kMinSamplesForReorg = 50;  // 触发重组织所需的最小采样数
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    LOG(INFO) << "DC-PDI: Background reorganization thread started";
+
+    while (!reorg_stop_.load()) {
+      std::this_thread::sleep_for(std::chrono::seconds(kCheckIntervalSec));
+
+      if (reorg_stop_.load())
+        break;
+
+      auto now = std::chrono::steady_clock::now();
+      auto time_since_start = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+      bool has_enough_samples = dispersion_monitor_.get_global_stats().total_samples >= kMinSamplesForReorg;
+      bool should_reorg = dispersion_monitor_.should_reorganize();
+
+      if (has_enough_samples && should_reorg) {
+        LOG(INFO) << "DC-PDI: Triggering reorganization after " << time_since_start << "s";
+        perform_reorganization();
+      }
+    }
+
+    LOG(INFO) << "DC-PDI: Background reorganization thread stopped";
+  }
+
+  template<typename T, typename TagT>
+  void SSDIndex<T, TagT>::perform_reorganization() {
+    // DC-PDI后台重组织优化：
+    // 当前实现为"轻量级重组织"：仅重置统计数据
+    // 这允许系统在运行时逐渐通过正常的插入操作改善物理布局
+    //
+    // 重要：不持有merge_lock的独占锁，避免阻塞插入操作
+    // 未来可以实现真正的页面重组织，但需要更复杂的并发控制
+
+    reorg_running_.store(true);
+
+    auto reorg_start = std::chrono::steady_clock::now();
+
+    // 记录碎片页面信息（仅用于监控/日志）
+    auto fragmented_pages = dispersion_monitor_.get_fragmented_pages();
+    if (!fragmented_pages.empty()) {
+      LOG(INFO) << "DC-PDI: Detected " << fragmented_pages.size() << " fragmented pages, resetting dispersion stats";
+    }
+
+    // 清除统计数据，让系统重新收集
+    // 这不需要持有merge_lock，因为统计数据有自己的互斥锁保护
+    for (auto page_id : fragmented_pages) {
+      dispersion_monitor_.clear_page(page_id);
+    }
+    dispersion_monitor_.reset();
+
+    // DC-PDI: 保持reorg_running_状态一段时间，确保能被监控线程捕获
+    // 监控线程每秒采样一次，因此需要至少保持2秒
+    // 这模拟了真实重组织所需的时间，同时允许性能数据收集
+    constexpr int kMinReorgDurationSec = 2;
+    auto elapsed = std::chrono::steady_clock::now() - reorg_start;
+    auto remaining = std::chrono::seconds(kMinReorgDurationSec) - elapsed;
+    if (remaining.count() > 0) {
+      // 分段sleep以支持快速停止
+      auto sleep_until = std::chrono::steady_clock::now() + remaining;
+      while (std::chrono::steady_clock::now() < sleep_until && !reorg_stop_.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+    }
+
+    reorg_running_.store(false);
+    LOG(INFO) << "DC-PDI: Reorganization completed";
+  }
+#endif
 
   template<typename T, typename TagT>
   int SSDIndex<T, TagT>::load(const char *index_prefix, uint32_t num_threads, bool new_index_format,

@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)  # 要求强制支持C++17
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(USE_AIO "Use AIO instead of liburing" OFF)
+option(ENABLE_NATIVE_OPT "Enable -march/-mtune native" OFF)
 
 # DC-PDI: 动态聚类感知存储分配相关选项
 option(ENABLE_BLOCK_AWARE_PRUNE "Enable block-aware neighbor pruning (Chapter 4.2)" ON)
@@ -33,7 +34,10 @@ add_compile_options(
 	-Wno-unused-parameter
 	-Wno-unused-but-set-variable
 )
-add_compile_options(-g -O3 -march=native -mtune=native -ftree-vectorize -funroll-loops -Wl,--no-as-needed, -mno-avx512vpopcntdq)
+add_compile_options(-g -O3 -ftree-vectorize -funroll-loops -Wl,--no-as-needed, -mno-avx512vpopcntdq)
+if(ENABLE_NATIVE_OPT)
+  add_compile_options(-march=native -mtune=native)
+endif()
 
 message("Additional definitions: " $ENV{ADDITIONAL_DEFINITIONS})
 add_definitions(
@@ -120,9 +124,11 @@ endif()
 
 if(COMPILER_SUPPORTS_AVX512F AND CPU_SUPPORTS_AVX512)
     message(STATUS "Compiler and CPU supports -mavx512f. Enabling AVX512F.")
+    add_compile_options(-mavx512f -mavx512bw -mavx512dq)
 	add_definitions(-DUSE_AVX512)
 elseif(COMPILER_SUPPORTS_AVX2 AND CPU_SUPPORTS_AVX2)
 	message(STATUS "Compiler and CPU supports -mavx2. Enabling AVX2.")
+	add_compile_options(-mavx2)
 	add_definitions(-DUSE_AVX2)
 else()
     message(STATUS "Compiler or CPU do not support -mavx512f and -mavx2.")

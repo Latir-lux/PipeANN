@@ -54,10 +54,13 @@
 set -e
 
 # ============= 配置参数 =============
-EXPERIMENT=${1:-"all"}
-DATASET=${2:-"sift"}
-BASE_DIR=${3:-"/mnt/xiaoxuanx/dataset"}
-OUTPUT_DIR=${4:-"/mnt/xiaoxuanx/dataset/exp/thesis_results/ablation_study"}
+# 注意：不要在这里初始化位置参数，因为它们会在后面的参数解析部分被正确设置
+# 这里只定义用于展示的默认值注释
+
+# EXPERIMENT: 1/2/3/4/all (默认: all)
+# DATASET: sift/deep/gist (默认: sift)
+# BASE_DIR: 数据集和索引的基础目录 (默认: /mnt/xiaoxuanx/dataset)
+# OUTPUT_DIR: 输出目录 (默认: /mnt/xiaoxuanx/dataset/exp/thesis_results/ablation_study)
 
 # 默认参数
 NUM_THREADS=32
@@ -70,47 +73,62 @@ THREAD_LIST="1,4,8,16,32,64"
 RECALL_AT=10
 
 # 解析额外参数
-shift 4 2>/dev/null || true
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    --num-threads)
-      NUM_THREADS="$2"
-      shift 2
-      ;;
-    --insert-count)
-      INSERT_COUNT="$2"
-      shift 2
-      ;;
-    --duration)
-      DURATION_SEC="$2"
-      shift 2
-      ;;
-    --insert-rate)
-      INSERT_RATE="$2"
-      shift 2
-      ;;
-    --base-ratio)
-      BASE_RATIO="$2"
-      shift 2
-      ;;
-    --L-values)
-      L_VALUES="$2"
-      shift 2
-      ;;
-    --thread-list)
-      THREAD_LIST="$2"
-      shift 2
-      ;;
-    --recall-at)
-      RECALL_AT="$2"
-      shift 2
-      ;;
-    *)
-      echo "Unknown option: $1"
-      exit 1
-      ;;
-  esac
-done
+# 先保存前4个位置参数，然后跳过它们，再解析可选参数
+saved_arg1="$1"
+saved_arg2="$2"
+saved_arg3="$3"
+saved_arg4="$4"
+
+# 只有在有第5个参数时才开始解析选项
+if [ $# -gt 4 ]; then
+  shift 4
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --num-threads)
+        NUM_THREADS="$2"
+        shift 2
+        ;;
+      --insert-count)
+        INSERT_COUNT="$2"
+        shift 2
+        ;;
+      --duration)
+        DURATION_SEC="$2"
+        shift 2
+        ;;
+      --insert-rate)
+        INSERT_RATE="$2"
+        shift 2
+        ;;
+      --base-ratio)
+        BASE_RATIO="$2"
+        shift 2
+        ;;
+      --L-values)
+        L_VALUES="$2"
+        shift 2
+        ;;
+      --thread-list)
+        THREAD_LIST="$2"
+        shift 2
+        ;;
+      --recall-at)
+        RECALL_AT="$2"
+        shift 2
+        ;;
+      *)
+        echo "Unknown option: $1"
+        exit 1
+        ;;
+    esac
+  done
+fi
+
+# 恢复位置参数
+EXPERIMENT="${saved_arg1:-all}"
+DATASET="${saved_arg2:-sift}"
+BASE_DIR="${saved_arg3:-/mnt/xiaoxuanx/dataset}"
+OUTPUT_DIR="${saved_arg4:-/mnt/xiaoxuanx/dataset/exp/thesis_results/ablation_study}"
 
 # 为不同数据集隔离输出目录
 RESULTS_DIR="${OUTPUT_DIR}/${DATASET}"
@@ -220,19 +238,19 @@ prepare_base_index() {
   local base_index="${INDEX_BASE}_ablation_base${base_pct}"
   
   if [ -f "${base_index}_disk.index" ]; then
-    echo "Base index already exists: ${base_index}"
+    echo "Base index already exists: ${base_index}" >&2
     echo "${base_index}"
     return
   fi
   
   if [ -f "${INDEX_BASE}_disk.index" ]; then
-    echo "Using existing full index as base: ${INDEX_BASE}"
+    echo "Using existing full index as base: ${INDEX_BASE}" >&2
     echo "${INDEX_BASE}"
     return
   fi
   
   # 需要构建基础索引
-  echo "Building base index (${base_pct}% of data)..."
+  echo "Building base index (${base_pct}% of data)..." >&2
   
   # 分割数据
   local base_data="${DATA_FILE%.*}_base${base_pct}.bin"
@@ -276,10 +294,10 @@ with open(data_file, "rb") as src, open(base_file, "wb") as dst:
 PY
   fi
   
-  # 构建索引
+  # 构建索引（输出重定向到stderr，避免污染返回值）
   mkdir -p $(dirname "${base_index}")
   ./build/tests/build_disk_index ${DATA_TYPE} ${base_data} ${base_index} \
-    96 128 32 256 ${NUM_THREADS} l2 pq
+    96 128 32 256 ${NUM_THREADS} l2 pq >&2
   
   echo "${base_index}"
 }

@@ -62,6 +62,10 @@ namespace pipeann {
     // write neighbor (e.g., PQ).
     nbr_handler->insert(point, target_id);
 
+    // DC-PDI优化控制：检查是否为DC-PDI模式（PIPE_SEARCH = 2）
+    // 在函数开始处声明一次，避免重复声明错误
+    const bool is_dcpdi = (this->get_search_mode() == PIPE_SEARCH);
+
     std::vector<Neighbor> exp_node_info;
     tsl::robin_map<uint32_t, T *> coord_map;
     // DC-PDI内存优化：减少coord_map和coord_buf的预分配大小
@@ -85,8 +89,6 @@ namespace pipeann {
     // 3. 只有在DC-PDI模式（PIPE_SEARCH）下才启用，确保不影响IP-DiskANN/FreshDiskANN
 #ifdef ENABLE_BLOCK_AWARE_PRUNE
     const size_t min_neighbors_for_block_aware = 6;
-    // 检查是否为DC-PDI模式（PIPE_SEARCH = 2）
-    const bool is_dcpdi = (this->get_search_mode() == PIPE_SEARCH);
     if (is_dcpdi && !page_ref.empty() && exp_node_info.size() >= min_neighbors_for_block_aware) {
       // DC-PDI优化v3: 直接使用最近邻（第一个）所在页面作为目标页面
       uint64_t target_page = node_sector_no(exp_node_info[0].id);
@@ -120,8 +122,6 @@ namespace pipeann {
     // DC-PDI优化v3: 使用聚类感知位置分配（论文3.2节）
     // 只有在DC-PDI模式（PIPE_SEARCH）下才启用，确保不影响IP-DiskANN/FreshDiskANN
     std::vector<uint64_t> locs;
-    // 检查是否为DC-PDI模式（PIPE_SEARCH = 2）
-    const bool is_dcpdi = (this->get_search_mode() == PIPE_SEARCH);
     if (is_dcpdi) {
       // DC-PDI模式：使用聚类感知位置分配
       std::vector<float> neighbor_dists;

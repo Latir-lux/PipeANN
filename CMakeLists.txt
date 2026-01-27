@@ -124,7 +124,7 @@ endif()
 
 if(COMPILER_SUPPORTS_AVX512F AND CPU_SUPPORTS_AVX512)
     message(STATUS "Compiler and CPU supports -mavx512f. Enabling AVX512F.")
-    add_compile_options(-mavx512f -mavx512bw)
+    add_compile_options(-mavx512f -mavx512bw -mavx512dq)
 	add_definitions(-DUSE_AVX512)
 elseif(COMPILER_SUPPORTS_AVX2 AND CPU_SUPPORTS_AVX2)
 	message(STATUS "Compiler and CPU supports -mavx2. Enabling AVX2.")

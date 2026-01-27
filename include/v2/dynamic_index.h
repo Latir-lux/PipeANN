@@ -12,6 +12,8 @@
 #include <string>
 #include <unordered_map>
 #include <memory>
+#include <future>
+#include <mutex>
 
 namespace pipeann {
 
@@ -42,6 +44,9 @@ namespace pipeann {
 
     void final_merge(const uint32_t &nthreads = 0,
                      const uint32_t &n_sampled_nbrs = std::numeric_limits<uint32_t>::max());
+
+    void request_merge_async(const uint32_t &nthreads = 0);
+    void wait_merge();
 
     bool is_reorganizing() const;
 
@@ -91,5 +96,9 @@ namespace pipeann {
     std::atomic<bool> _merge_in_progress{false};
     pipeann::Parameters _buffer_params;
     std::unique_ptr<pipeann::Index<T, TagT>> _buffer;
+    std::shared_ptr<pipeann::Index<T, TagT>> _buffer_pending;
+
+    std::mutex _merge_thread_mu;
+    std::future<void> _merge_future;
   };
 };  // namespace pipeann

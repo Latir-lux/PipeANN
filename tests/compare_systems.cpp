@@ -15,6 +15,7 @@
 #include <index.h>
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <future>
 #include <numeric>
 #include <omp.h>
@@ -520,9 +521,10 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
   if (system_type == FRESH_DISKANN && !merge_done.load()) {
     uint64_t final_inserts = insert_count.load();
     if (final_inserts > 0) {
-      std::cout << "[" << system_names[system_type] << "] Forcing final merge at " << final_inserts << " inserts"
+      std::cout << "[" << system_names[system_type] << "] Requesting final merge at " << final_inserts << " inserts"
                 << std::endl;
-      index.final_merge(NUM_SEARCH_THREADS);
+      index.request_merge_async(NUM_SEARCH_THREADS);
+      index.wait_merge();
       merge_done.store(true);
     }
   }
@@ -694,9 +696,11 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
   if (system_type == FRESH_DISKANN) {
     uint64_t final_inserts = insert_count.load();
     if (final_inserts > 0 && (final_inserts % MERGE_INTERVAL) != 0) {
-      std::cout << "[Exp3] Forcing final merge for FreshDiskANN at " << final_inserts << " inserts" << std::endl;
-      index.final_merge(NUM_SEARCH_THREADS / 2);
+      std::cout << "[Exp3] Requesting final merge for FreshDiskANN at " << final_inserts << " inserts" << std::endl;
+      index.request_merge_async(NUM_SEARCH_THREADS / 2);
+      index.wait_merge();
     }
+    index.wait_merge();
     std::cout << "[Exp3] Waiting for FreshDiskANN reorganization to complete..." << std::endl;
     while (index.is_reorganizing()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -765,6 +769,12 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
     base_tag_offset = index._disk_index->num_points;
   }
 
+#ifdef PIPEANN_TEST_HOOKS
+  const char *force_merge_env = std::getenv("PIPEANN_EXP1_FORCE_MERGE_AT");
+  uint64_t force_merge_at = force_merge_env ? std::stoull(force_merge_env) : 0;
+  std::atomic<bool> force_merge_triggered(false);
+#endif
+
   std::vector<double> search_latencies;
   std::mutex lat_mutex;
 
@@ -828,6 +838,15 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
 
       TagT tag = static_cast<TagT>(base_tag_offset + idx);
       index.insert(insert_data + idx * data_dim, tag);
+
+#ifdef PIPEANN_TEST_HOOKS
+      if (system_type == FRESH_DISKANN && force_merge_at > 0 && idx + 1 >= force_merge_at) {
+        if (!force_merge_triggered.exchange(true)) {
+          std::cout << "[Exp1][TEST] Triggering background merge at insert " << (idx + 1) << std::endl;
+          index.request_merge_async(NUM_SEARCH_THREADS / 2);
+        }
+      }
+#endif
 
       if (duration_sec > 0 && insert_rate > 0) {
         while (!stop_test.load()) {
@@ -965,9 +984,10 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
   if (system_type == FRESH_DISKANN) {
     uint64_t final_inserts = insert_count.load();
     if (final_inserts > 0 && (final_inserts % MERGE_INTERVAL) != 0) {
-      std::cout << "[Exp1] Forcing final merge for FreshDiskANN at " << final_inserts << " inserts" << std::endl;
-      index.final_merge(NUM_SEARCH_THREADS / 2);
+      std::cout << "[Exp1] Requesting final merge for FreshDiskANN at " << final_inserts << " inserts" << std::endl;
+      index.request_merge_async(NUM_SEARCH_THREADS / 2);
     }
+    index.wait_merge();
     std::cout << "[Exp1] Waiting for FreshDiskANN reorganization to complete..." << std::endl;
     while (index.is_reorganizing()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -1198,6 +1218,18 @@ void run_update_throughput_exp(const std::string &index_prefix, const std::strin
  * 主函数
  */
 int main(int argc, char **argv) {
+#ifdef USE_AVX512
+  if (!__builtin_cpu_supports("avx512f")) {
+    std::cerr << "Error: binary requires AVX-512 but CPU does not support it." << std::endl;
+    return -1;
+  }
+#endif
+#ifdef USE_AVX2
+  if (!__builtin_cpu_supports("avx2")) {
+    std::cerr << "Error: binary requires AVX2 but CPU does not support it." << std::endl;
+    return -1;
+  }
+#endif
   if (argc < 10) {
     std::cout << "Usage: " << argv[0] << " <data_type> <index_prefix> <query_file> <gt_file>"
               << " <insert_data_file> <system_type> <experiment_type>"

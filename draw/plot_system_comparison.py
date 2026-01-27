@@ -230,29 +230,58 @@ def plot_update_throughput_comparison(
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
+    # DC-PDI重组织阶段的颜色标记
+    dc_reorg_color = "#56B4E9"  # 浅蓝色表示重组织阶段
+    dc_normal_color = COLORS["DC-PDI"]
+
     # 1. 吞吐量随时间变化
     ax1 = axes[0]
     for system_name, df in data.items():
-        ax1.plot(
-            df["time_sec"],
-            df["throughput_ops"],
-            color=COLORS[system_name],
-            linestyle=LINESTYLES[system_name],
-            linewidth=2,
-            label=system_name,
-        )
-
-        # 标记merge点
-        merge_points = df[df["merge_triggered"] == 1]
-        if not merge_points.empty:
-            ax1.scatter(
-                merge_points["time_sec"],
-                merge_points["throughput_ops"],
-                color=COLORS[system_name],
-                marker="x",
-                s=100,
-                zorder=5,
+        if system_name == "DC-PDI":
+            reorg_mask = (
+                df.get("reorg_running", pd.Series([0] * len(df))).astype(int) == 1
             )
+            # 绘制正常阶段
+            ax1.plot(
+                df.loc[~reorg_mask, "time_sec"],
+                df.loc[~reorg_mask, "throughput_ops"],
+                color=dc_normal_color,
+                linestyle="-",
+                linewidth=2,
+                label="DC-PDI",
+            )
+            # 绘制重组织阶段（如果存在）
+            if reorg_mask.any():
+                ax1.plot(
+                    df.loc[reorg_mask, "time_sec"],
+                    df.loc[reorg_mask, "throughput_ops"],
+                    color=dc_reorg_color,
+                    linestyle="-",
+                    linewidth=2,
+                    label="DC-PDI (reorg)",
+                )
+        else:
+            ax1.plot(
+                df["time_sec"],
+                df["throughput_ops"],
+                color=COLORS[system_name],
+                linestyle=LINESTYLES[system_name],
+                linewidth=2,
+                label=system_name,
+            )
+
+        # 标记merge点（FreshDiskANN和IP-DiskANN）
+        if "merge_triggered" in df.columns:
+            merge_points = df[df["merge_triggered"] == 1]
+            if not merge_points.empty:
+                ax1.scatter(
+                    merge_points["time_sec"],
+                    merge_points["throughput_ops"],
+                    color=COLORS[system_name],
+                    marker="x",
+                    s=100,
+                    zorder=5,
+                )
 
     ax1.set_xlabel("时间 (秒)", fontsize=13)
     ax1.set_ylabel("更新吞吐量 (ops/s)", fontsize=13)
@@ -263,14 +292,36 @@ def plot_update_throughput_comparison(
     # 2. 内存使用对比
     ax2 = axes[1]
     for system_name, df in data.items():
-        ax2.plot(
-            df["num_inserts"],
-            df["memory_rss_mb"],
-            color=COLORS[system_name],
-            linestyle=LINESTYLES[system_name],
-            linewidth=2,
-            label=system_name,
-        )
+        if system_name == "DC-PDI":
+            reorg_mask = (
+                df.get("reorg_running", pd.Series([0] * len(df))).astype(int) == 1
+            )
+            ax2.plot(
+                df.loc[~reorg_mask, "num_inserts"],
+                df.loc[~reorg_mask, "memory_rss_mb"],
+                color=dc_normal_color,
+                linestyle="-",
+                linewidth=2,
+                label="DC-PDI",
+            )
+            if reorg_mask.any():
+                ax2.plot(
+                    df.loc[reorg_mask, "num_inserts"],
+                    df.loc[reorg_mask, "memory_rss_mb"],
+                    color=dc_reorg_color,
+                    linestyle="-",
+                    linewidth=2,
+                    label="DC-PDI (reorg)",
+                )
+        else:
+            ax2.plot(
+                df["num_inserts"],
+                df["memory_rss_mb"],
+                color=COLORS[system_name],
+                linestyle=LINESTYLES[system_name],
+                linewidth=2,
+                label=system_name,
+            )
 
     ax2.set_xlabel("累计更新次数", fontsize=13)
     ax2.set_ylabel("内存使用 (MB)", fontsize=13)
@@ -322,17 +373,49 @@ def plot_concurrent_performance_comparison(
 
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
+    # DC-PDI重组织阶段的颜色标记
+    dc_reorg_color = "#56B4E9"  # 浅蓝色表示重组织阶段
+    dc_normal_color = COLORS["DC-PDI"]
+
+    def plot_with_reorg_marking(ax, df, system_name, x_col, y_col, y_scale=1.0, add_legend=True):
+        """辅助函数：绘制带有重组织标记的曲线（仅DC-PDI）"""
+        if system_name == "DC-PDI":
+            reorg_mask = (
+                df.get("reorg_running", pd.Series([0] * len(df))).astype(int) == 1
+            )
+            # 绘制正常阶段
+            ax.plot(
+                df.loc[~reorg_mask, x_col],
+                df.loc[~reorg_mask, y_col] / y_scale,
+                color=dc_normal_color,
+                linestyle="-",
+                linewidth=2,
+                label="DC-PDI" if add_legend else None,
+            )
+            # 绘制重组织阶段（如果存在）
+            if reorg_mask.any():
+                ax.plot(
+                    df.loc[reorg_mask, x_col],
+                    df.loc[reorg_mask, y_col] / y_scale,
+                    color=dc_reorg_color,
+                    linestyle="-",
+                    linewidth=2,
+                    label="DC-PDI (reorg)" if add_legend else None,
+                )
+        else:
+            ax.plot(
+                df[x_col],
+                df[y_col] / y_scale,
+                color=COLORS[system_name],
+                linestyle=LINESTYLES[system_name],
+                linewidth=2,
+                label=system_name if add_legend else None,
+            )
+
     # 1. 搜索QPS随时间变化
     ax1 = axes[0, 0]
     for system_name, df in data.items():
-        ax1.plot(
-            df["time_sec"],
-            df["search_qps"],
-            color=COLORS[system_name],
-            linestyle=LINESTYLES[system_name],
-            linewidth=2,
-            label=system_name,
-        )
+        plot_with_reorg_marking(ax1, df, system_name, "time_sec", "search_qps")
     ax1.set_xlabel("时间 (秒)", fontsize=13)
     ax1.set_ylabel("搜索QPS", fontsize=13)
     ax1.set_title("(a) 并发搜索吞吐量", fontsize=14, fontweight="bold")
@@ -342,14 +425,7 @@ def plot_concurrent_performance_comparison(
     # 2. P99延迟随时间变化
     ax2 = axes[0, 1]
     for system_name, df in data.items():
-        ax2.plot(
-            df["time_sec"],
-            df["search_p99_us"] / 1000,
-            color=COLORS[system_name],
-            linestyle=LINESTYLES[system_name],
-            linewidth=2,
-            label=system_name,
-        )
+        plot_with_reorg_marking(ax2, df, system_name, "time_sec", "search_p99_us", y_scale=1000)
     ax2.set_xlabel("时间 (秒)", fontsize=13)
     ax2.set_ylabel("P99搜索延迟 (ms)", fontsize=13)
     ax2.set_title("(b) 并发搜索P99延迟", fontsize=14, fontweight="bold")
@@ -359,14 +435,7 @@ def plot_concurrent_performance_comparison(
     # 3. 插入吞吐量随时间变化
     ax3 = axes[1, 0]
     for system_name, df in data.items():
-        ax3.plot(
-            df["time_sec"],
-            df["insert_tput"],
-            color=COLORS[system_name],
-            linestyle=LINESTYLES[system_name],
-            linewidth=2,
-            label=system_name,
-        )
+        plot_with_reorg_marking(ax3, df, system_name, "time_sec", "insert_tput")
     ax3.set_xlabel("时间 (秒)", fontsize=13)
     ax3.set_ylabel("插入吞吐量 (ops/s)", fontsize=13)
     ax3.set_title("(c) 并发插入吞吐量", fontsize=14, fontweight="bold")

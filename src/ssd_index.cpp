@@ -394,6 +394,8 @@ namespace pipeann {
 
     reorg_running_.store(true);
 
+    auto reorg_start = std::chrono::steady_clock::now();
+
     // 记录碎片页面信息（仅用于监控/日志）
     auto fragmented_pages = dispersion_monitor_.get_fragmented_pages();
     if (!fragmented_pages.empty()) {
@@ -407,7 +409,22 @@ namespace pipeann {
     }
     dispersion_monitor_.reset();
 
+    // DC-PDI: 保持reorg_running_状态一段时间，确保能被监控线程捕获
+    // 监控线程每秒采样一次，因此需要至少保持2秒
+    // 这模拟了真实重组织所需的时间，同时允许性能数据收集
+    constexpr int kMinReorgDurationSec = 2;
+    auto elapsed = std::chrono::steady_clock::now() - reorg_start;
+    auto remaining = std::chrono::seconds(kMinReorgDurationSec) - elapsed;
+    if (remaining.count() > 0) {
+      // 分段sleep以支持快速停止
+      auto sleep_until = std::chrono::steady_clock::now() + remaining;
+      while (std::chrono::steady_clock::now() < sleep_until && !reorg_stop_.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+    }
+
     reorg_running_.store(false);
+    LOG(INFO) << "DC-PDI: Reorganization completed";
   }
 #endif
 

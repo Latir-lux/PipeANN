@@ -36,13 +36,6 @@
 
 namespace pipeann {
   namespace {
-    inline void update_bin_header(const std::string &path, int npts, int dim) {
-      std::fstream io(path, std::ios::in | std::ios::out | std::ios::binary);
-      io.write(reinterpret_cast<const char *>(&npts), sizeof(int));
-      io.write(reinterpret_cast<const char *>(&dim), sizeof(int));
-      io.close();
-    }
-
     template<typename T>
     std::unique_ptr<pipeann::AbstractNeighbor<T>> create_neighbor_handler(
         const pipeann::AbstractNeighbor<T> *existing) {
@@ -452,88 +445,59 @@ namespace pipeann {
 
   template<typename T, typename TagT>
   void DynamicSSDIndex<T, TagT>::rebuild_merge(const uint32_t &nthreads, const uint32_t &n_sampled_nbrs) {
-    (void) n_sampled_nbrs;
     uint32_t merge_threads = nthreads == 0 ? _num_threads : nthreads;
-    const auto &deleted_set = deletion_sets[1 - active_delete_set];
     auto pending_buffer = _buffer_pending;
 
-    std::string tmp_prefix = _disk_index_prefix_out + "_fresh";
-    std::string tmp_data = tmp_prefix + ".bin";
-    std::string tmp_tags = tmp_prefix + ".tags.bin";
-
-    if (std::filesystem::exists(tmp_data)) {
-      std::filesystem::remove(tmp_data);
+    std::vector<TagT> deleted_tags_snapshot;
+    tsl::robin_set<TagT> deleted_set_snapshot;
+    tsl::robin_set<TagT> active_deleted_snapshot;
+    {
+      std::shared_lock<std::shared_timed_mutex> lock(delete_lock);
+      deleted_tags_snapshot = deleted_tags[1 - active_delete_set];
+      deleted_set_snapshot = deletion_sets[1 - active_delete_set];
+      active_deleted_snapshot = deletion_sets[active_delete_set];
     }
-    if (std::filesystem::exists(tmp_tags)) {
-      std::filesystem::remove(tmp_tags);
+
+    tsl::robin_set<uint32_t> merged_delete_set_ids;
+    merged_delete_set_ids.reserve(deleted_set_snapshot.size() + active_deleted_snapshot.size());
+    for (const auto &tag : deleted_set_snapshot) {
+      merged_delete_set_ids.insert(static_cast<uint32_t>(tag));
+    }
+    for (const auto &tag : active_deleted_snapshot) {
+      merged_delete_set_ids.insert(static_cast<uint32_t>(tag));
     }
 
-    _disk_index->export_live_points(tmp_data, tmp_tags, deleted_set, merge_threads);
+    auto merge_nbr = create_neighbor_handler(_disk_index->nbr_handler);
+    auto merge_reader = std::shared_ptr<AlignedFileReader>(new LinuxAlignedFileReader());
+    auto merge_index = std::unique_ptr<SSDIndex<T, TagT>>(
+        new SSDIndex<T, TagT>(this->_dist_metric, merge_reader, merge_nbr.release(), true, &_paras_disk));
+    merge_index->load(_disk_index_prefix_in.c_str(), merge_threads, true, _use_page_search);
 
-    size_t total_points = 0;
-    size_t base_points = 0;
-    size_t base_dim = 0;
-    pipeann::get_bin_metadata(tmp_data, base_points, base_dim);
-    total_points = base_points;
+    merge_index->merge_deletes(_disk_index_prefix_in, _disk_index_prefix_out, deleted_tags_snapshot,
+                               deleted_set_snapshot, merge_threads, n_sampled_nbrs);
+    merge_index->reload(_disk_index_prefix_out.c_str(), merge_threads);
 
     if (pending_buffer != nullptr) {
-      std::ofstream data_writer(tmp_data, std::ios::binary | std::ios::app);
-      std::ofstream tags_writer(tmp_tags, std::ios::binary | std::ios::app);
-
       tsl::robin_set<TagT> active_tags;
       pending_buffer->get_active_tags(active_tags);
       std::vector<T> buf_vec(_buffer_aligned_dim);
       for (auto tag : active_tags) {
-        if (deleted_set.find(tag) != deleted_set.end()) {
+        if (merged_delete_set_ids.find(static_cast<uint32_t>(tag)) != merged_delete_set_ids.end()) {
           continue;
         }
         if (pending_buffer->get_vector_by_tag(tag, buf_vec.data()) != 0) {
           continue;
         }
-        data_writer.write(reinterpret_cast<const char *>(buf_vec.data()), _dim * sizeof(T));
-        tags_writer.write(reinterpret_cast<const char *>(&tag), sizeof(TagT));
-        total_points++;
-      }
-      data_writer.close();
-      tags_writer.close();
-    }
-
-    update_bin_header(tmp_data, static_cast<int>(total_points), static_cast<int>(_dim));
-    update_bin_header(tmp_tags, static_cast<int>(total_points), 1);
-
-    pipeann::Metric build_metric = _dist_metric;
-    if (_disk_index->is_data_normalized()) {
-      build_metric = pipeann::Metric::L2;
-    }
-
-    uint32_t bytes_per_nbr = 32;
-    std::string pq_file = _disk_index_prefix_in + "_pq_compressed.bin";
-    if (std::filesystem::exists(pq_file)) {
-      size_t pq_npts = 0;
-      size_t pq_dim = 0;
-      pipeann::get_bin_metadata(pq_file, pq_npts, pq_dim);
-      if (pq_dim > 0) {
-        bytes_per_nbr = static_cast<uint32_t>(pq_dim);
+        merge_index->insert_in_place(buf_vec.data(), tag, &merged_delete_set_ids);
       }
     }
-
-    auto build_nbr = create_neighbor_handler(_disk_index->nbr_handler);
-    pipeann::build_disk_index<T, TagT>(tmp_data.c_str(), _disk_index_prefix_out.c_str(), _paras_disk.R, _paras_disk.L,
-                                       _build_ram_gb, merge_threads, bytes_per_nbr, build_metric, tmp_tags.c_str(),
-                                       build_nbr.get());
-
-    auto load_nbr = create_neighbor_handler(_disk_index->nbr_handler);
-    auto new_reader = std::shared_ptr<AlignedFileReader>(new LinuxAlignedFileReader());
-    auto new_index = std::unique_ptr<SSDIndex<T, TagT>>(
-        new SSDIndex<T, TagT>(this->_dist_metric, new_reader, load_nbr.release(), true, &_paras_disk));
-    new_index->load(_disk_index_prefix_out.c_str(), merge_threads, true, _use_page_search);
 
     SSDIndex<T, TagT> *old_index = nullptr;
     {
       std::unique_lock<std::shared_timed_mutex> lock(_merge_lock);
       old_index = _disk_index;
-      _disk_index = new_index.release();
-      reader = new_reader;
+      _disk_index = merge_index.release();
+      reader = merge_reader;
       std::swap(_disk_index_prefix_in, _disk_index_prefix_out);
       _buffer_pending.reset();
     }
@@ -542,12 +506,6 @@ namespace pipeann {
       delete old_index;
     }
 
-    if (std::filesystem::exists(tmp_data)) {
-      std::filesystem::remove(tmp_data);
-    }
-    if (std::filesystem::exists(tmp_tags)) {
-      std::filesystem::remove(tmp_tags);
-    }
     _merge_in_progress.store(false, std::memory_order_relaxed);
   }
 

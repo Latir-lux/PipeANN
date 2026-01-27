@@ -234,8 +234,12 @@ namespace pipeann {
       reader.read((char *) dists, npts * dim * sizeof(float));
     }
     if (truthset_type == 3) {
-      *tags = new uint32_t[npts * dim];
-      reader.read((char *) *tags, npts * dim * sizeof(uint32_t));
+      // Only read and store tags if the caller provided a valid pointer
+      if (tags != nullptr) {
+        *tags = new uint32_t[npts * dim];
+        reader.read((char *) *tags, npts * dim * sizeof(uint32_t));
+      }
+      // If tags is nullptr, skip reading the third block (caller doesn't need it)
     }
   }
 

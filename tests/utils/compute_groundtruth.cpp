@@ -209,18 +209,22 @@ inline void save_groundtruth_as_one_file(const std::string filename, int32_t *da
   int npts_i32 = (int) npts, ndims_i32 = (int) ndims;
   writer.write((char *) &npts_i32, sizeof(int));
   writer.write((char *) &ndims_i32, sizeof(int));
+  
+  // Compute file size: header + ids + dists, plus tags if provided
+  size_t file_size = 2 * sizeof(int) + npts * ndims * sizeof(uint32_t) + npts * ndims * sizeof(float);
+  if (tags != nullptr) {
+    file_size += npts * ndims * sizeof(uint32_t);
+  }
   std::cout << "Saving truthset in one file (npts, dim, npts*dim id-matrix, "
-               "npts*dim dist-matrix) with npts = "
-            << npts << ", dim = " << ndims << ", size = " << 2 * npts * ndims * sizeof(unsigned) + 2 * sizeof(int)
-            << "B" << std::endl;
+               "npts*dim dist-matrix" << (tags != nullptr ? ", npts*dim tags" : "") << ") with npts = "
+            << npts << ", dim = " << ndims << ", size = " << file_size << "B" << std::endl;
 
   //    data = new T[npts_u64 * ndims_u64];
   writer.write((char *) data, npts * ndims * sizeof(uint32_t));
   writer.write((char *) distances, npts * ndims * sizeof(float));
+  // Only write tags block if tags are explicitly provided
   if (tags != nullptr) {
     writer.write((char *) tags, npts * ndims * sizeof(uint32_t));
-  } else {
-    writer.write((char *) data, npts * ndims * sizeof(uint32_t));
   }
 
   writer.close();

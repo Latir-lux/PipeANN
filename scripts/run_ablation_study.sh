@@ -402,16 +402,17 @@ run_exp1_clustering() {
   echo ""
 
   # 直接复用run_system_comparison.sh生成的所有文件，不进行任何文件生成
-  local base_pct
-  base_pct=$(python3 -c "print(int(round(${BASE_RATIO} * 100)))")
+  # 使用与run_system_comparison.sh完全相同的文件命名格式
+  local exp1_base_tag
+  exp1_base_tag=$(printf "%s" "${BASE_RATIO}" | tr '.' 'p')
 
   # 使用run_system_comparison.sh的exp1索引路径
-  local exp_index="${INDEX_BASE}_exp1_base${base_pct}"
+  local exp_index="${INDEX_BASE}_exp1_base${exp1_base_tag}"
 
   # 使用run_system_comparison.sh的GT文件路径
   local gt_ext="${GT_FILE##*.}"
   local gt_prefix="${GT_FILE%.*}"
-  local exp1_gt="${gt_prefix}_exp1_base${base_pct}_k100.${gt_ext}"
+  local exp1_gt="${gt_prefix}_exp1_base${exp1_base_tag}_k100.${gt_ext}"
 
   # 验证所有必需文件存在
   if [ ! -f "${exp_index}_disk.index" ]; then

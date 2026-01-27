@@ -53,6 +53,28 @@ BUILD_RAM_GB=${17:-${BUILD_RAM_GB:-"128"}}
 NUM_THREADS=32
 RECALL_AT=10
 
+# ============= 构建目录配置 =============
+# 允许为DC-PDI与基线系统使用不同编译选项的build目录
+DEFAULT_BUILD_DIR=${BUILD_DIR:-"./build"}
+DCPDI_BUILD_DIR=${DCPDI_BUILD_DIR:-"${DEFAULT_BUILD_DIR}"}
+BASELINE_BUILD_DIR=${BASELINE_BUILD_DIR:-"${DEFAULT_BUILD_DIR}"}
+
+build_dir_for_system() {
+  local system_name=$1
+  if [ "${system_name}" = "dc-pdi" ]; then
+    echo "${DCPDI_BUILD_DIR}"
+  else
+    echo "${BASELINE_BUILD_DIR}"
+  fi
+}
+
+compare_systems_bin_for() {
+  local system_name=$1
+  local build_dir
+  build_dir=$(build_dir_for_system "${system_name}")
+  echo "${build_dir}/tests/compare_systems"
+}
+
 # 为不同数据集隔离输出目录，避免覆盖
 RESULTS_DIR="${OUTPUT_DIR}/${DATASET}"
 mkdir -p ${RESULTS_DIR}
@@ -303,7 +325,9 @@ run_search_latency_exp() {
   if [ "${system_type}" != "0" ]; then
     disable_dispersion=1
   fi
-  PIPEANN_DISABLE_DISPERSION_MONITOR=${disable_dispersion} ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${gt_file_to_use} \
+  local compare_bin
+  compare_bin=$(compare_systems_bin_for "${system_name}")
+  PIPEANN_DISABLE_DISPERSION_MONITOR=${disable_dispersion} ${compare_bin} ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${gt_file_to_use} \
     ${EXP1_UPDATE_FILE} ${system_type} 1 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${EXP1_L_INIT} \
     --exp1-duration-sec ${EXP1_DURATION_SEC} --exp1-update-ratio 1.0 --exp1-target-recall ${EXP1_TARGET_RECALL} \
     --exp1-L-min ${EXP1_L_MIN} --exp1-L-max ${EXP1_L_MAX} --exp1-L-step ${EXP1_L_STEP} \
@@ -334,7 +358,9 @@ run_update_throughput_exp() {
   if [ "${system_type}" != "0" ]; then
     disable_dispersion=1
   fi
-  PIPEANN_DISABLE_DISPERSION_MONITOR=${disable_dispersion} ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
+  local compare_bin
+  compare_bin=$(compare_systems_bin_for "${system_name}")
+  PIPEANN_DISABLE_DISPERSION_MONITOR=${disable_dispersion} ${compare_bin} ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
     ${insert_file} ${system_type} 2 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} \
     --build-ram-gb ${BUILD_RAM_GB}
   
@@ -789,7 +815,9 @@ run_concurrent_exp() {
   if [ "${system_type}" != "0" ]; then
     disable_dispersion=1
   fi
-  PIPEANN_DISABLE_DISPERSION_MONITOR=${disable_dispersion} ./build/tests/compare_systems ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
+  local compare_bin
+  compare_bin=$(compare_systems_bin_for "${system_name}")
+  PIPEANN_DISABLE_DISPERSION_MONITOR=${disable_dispersion} ${compare_bin} ${DATA_TYPE} ${system_index} ${QUERY_FILE} ${GT_FILE} \
     ${insert_file} ${system_type} 3 ${RESULTS_DIR} ${NUM_THREADS} ${RECALL_AT} ${L_VALUES} \
     --exp3-duration-sec ${duration_sec} --exp3-update-ratio 1.0 \
     --build-ram-gb ${BUILD_RAM_GB}
@@ -834,9 +862,9 @@ if [ ! -f "${GT_FILE}" ]; then
 fi
 
 # 检查可执行文件
-if [ ! -f "./build/tests/compare_systems" ]; then
-  echo "Error: compare_systems executable not found. Please compile first:"
-  echo "  cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make compare_systems"
+if [ ! -f "${DCPDI_BUILD_DIR}/tests/compare_systems" ] && [ ! -f "${BASELINE_BUILD_DIR}/tests/compare_systems" ]; then
+  echo "Error: compare_systems executable not found. Please compile first:" >&2
+  echo "  cd ${DEFAULT_BUILD_DIR} && cmake .. -DCMAKE_BUILD_TYPE=Release && make compare_systems" >&2
   exit 1
 fi
 

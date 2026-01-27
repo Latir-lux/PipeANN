@@ -188,15 +188,42 @@ const int NUM_DELETE_THREADS = 1;
 const int MERGE_INTERVAL = 10000;  // FreshDiskANN每10000次更新合并一次
 static uint32_t BUILD_RAM_GB = 0;
 
-// 获取内存使用
-void get_memory_usage(double &rss_kb, double &vm_kb) {
-  int tSize = 0, resident = 0, share = 0;
-  std::ifstream buffer("/proc/self/statm");
-  buffer >> tSize >> resident >> share;
-  buffer.close();
-  long page_size_kb = sysconf(_SC_PAGE_SIZE) / 1024;
-  rss_kb = resident * page_size_kb;
-  vm_kb = tSize * page_size_kb;
+// 获取内存使用 (RSS/VM/峰值RSS)
+void get_memory_usage(double &rss_kb, double &vm_kb, double &peak_rss_kb) {
+  rss_kb = 0.0;
+  vm_kb = 0.0;
+  peak_rss_kb = 0.0;
+
+  std::ifstream status("/proc/self/status");
+  if (status.is_open()) {
+    std::string key;
+    while (status >> key) {
+      if (key == "VmRSS:") {
+        status >> rss_kb;
+      } else if (key == "VmSize:") {
+        status >> vm_kb;
+      } else if (key == "VmHWM:") {
+        status >> peak_rss_kb;
+      }
+      status.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    }
+    status.close();
+  }
+
+  if (rss_kb <= 0.0 || vm_kb <= 0.0) {
+    int tSize = 0, resident = 0, share = 0;
+    std::ifstream buffer("/proc/self/statm");
+    if (buffer.is_open()) {
+      buffer >> tSize >> resident >> share;
+      buffer.close();
+      long page_size_kb = sysconf(_SC_PAGE_SIZE) / 1024;
+      rss_kb = resident * page_size_kb;
+      vm_kb = tSize * page_size_kb;
+      if (peak_rss_kb <= 0.0) {
+        peak_rss_kb = rss_kb;
+      }
+    }
+  }
 }
 
 uint64_t get_directory_size(const std::filesystem::path &dir_path) {
@@ -335,11 +362,11 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
 
   // 加载索引
   pipeann::SSDIndex<T, TagT> index(pipeann::L2, reader, nbr_handler, false);
-  
+
   // DC-PDI优化控制：设置搜索模式，这样SSDIndex可以根据模式启用DC-PDI特有优化
   // 必须在load之前设置，因为load可能会初始化与搜索模式相关的数据结构
   index.set_search_mode(search_mode);
-  
+
   int load_result = index.load(index_prefix.c_str(), num_threads, true, use_page_search);
 
   if (load_result != 0) {
@@ -449,7 +476,8 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
                                size_t data_dim, SystemType system_type, const std::string &output_file) {
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
-    ofs << "system,time_sec,num_inserts,throughput_ops,memory_rss_mb,disk_usage_mb,merge_triggered,reorg_running\n";
+    ofs << "system,time_sec,num_inserts,throughput_ops,memory_rss_mb,memory_peak_mb,disk_usage_mb,merge_triggered,"
+           "reorg_running\n";
   }
 
   std::atomic<uint64_t> insert_count(0);
@@ -491,8 +519,8 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
       double elapsed_sec = timer.elapsed() / 1e6;
       double throughput = current_inserts / elapsed_sec;
 
-      double rss_kb, vm_kb;
-      get_memory_usage(rss_kb, vm_kb);
+      double rss_kb, vm_kb, peak_rss_kb;
+      get_memory_usage(rss_kb, vm_kb, peak_rss_kb);
       double disk_mb = static_cast<double>(get_disk_usage_bytes(index._disk_index_prefix_in)) / (1024.0 * 1024.0);
 
       int reorg_running = 0;
@@ -500,7 +528,8 @@ void compare_update_throughput(pipeann::DynamicSSDIndex<T, TagT> &index, T *inse
       reorg_running = index.is_reorganizing() ? 1 : 0;
 #endif
       ofs << system_names[system_type] << "," << elapsed_sec << "," << current_inserts << "," << throughput << ","
-          << (rss_kb / 1024.0) << "," << disk_mb << "," << (merge_done.load() ? 1 : 0) << "," << reorg_running << "\n";
+          << (rss_kb / 1024.0) << "," << (peak_rss_kb / 1024.0) << "," << disk_mb << "," << (merge_done.load() ? 1 : 0)
+          << "," << reorg_running << "\n";
       ofs.flush();
 
       if (current_inserts >= num_inserts) {
@@ -548,8 +577,8 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
                                     SystemType system_type, const std::string &output_file) {
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
-    ofs << "system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb,disk_usage_mb,reorg_"
-           "running\n";
+    ofs << "system,time_sec,search_qps,search_p99_us,insert_ops,insert_tput,memory_rss_mb,memory_peak_mb,disk_usage_mb,"
+           "reorg_running\n";
   }
 
   std::atomic<uint64_t> search_count(0);
@@ -676,13 +705,14 @@ void compare_concurrent_performance(pipeann::DynamicSSDIndex<T, TagT> &index, T 
         }
       }
 
-      double rss_kb, vm_kb;
-      get_memory_usage(rss_kb, vm_kb);
+      double rss_kb, vm_kb, peak_rss_kb;
+      get_memory_usage(rss_kb, vm_kb, peak_rss_kb);
       double disk_mb = static_cast<double>(get_disk_usage_bytes(index._disk_index_prefix_in)) / (1024.0 * 1024.0);
 
       int reorg_running = index.is_reorganizing() ? 1 : 0;
       ofs << system_names[system_type] << "," << elapsed_sec << "," << search_qps << "," << p99_lat << "," << inserts
-          << "," << insert_tput << "," << (rss_kb / 1024.0) << "," << disk_mb << "," << reorg_running << "\n";
+          << "," << insert_tput << "," << (rss_kb / 1024.0) << "," << (peak_rss_kb / 1024.0) << "," << disk_mb << ","
+          << reorg_running << "\n";
       ofs.flush();
 
       if ((duration_sec > 0 && elapsed_sec >= duration_sec) || inserts >= insert_num) {
@@ -748,7 +778,7 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
   std::ofstream ofs(output_file, std::ios::app);
   if (ofs.tellp() == 0) {
     ofs << "system,time_sec,L,recall_at,recall_target,recall_pct,search_qps,p50_lat_us,p90_lat_us,p99_lat_us,"
-           "mean_ios,memory_rss_mb,disk_usage_mb,reorg_running\n";
+           "mean_ios,memory_rss_mb,memory_peak_mb,disk_usage_mb,reorg_running\n";
   }
 
   // L值动态调整参数 (使用传入的参数)
@@ -960,8 +990,8 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
         }
       }
 
-      double rss_kb, vm_kb;
-      get_memory_usage(rss_kb, vm_kb);
+      double rss_kb, vm_kb, peak_rss_kb;
+      get_memory_usage(rss_kb, vm_kb, peak_rss_kb);
       double disk_mb = static_cast<double>(get_disk_usage_bytes(index._disk_index_prefix_in)) / (1024.0 * 1024.0);
 
       int reorg_running = index.is_reorganizing() ? 1 : 0;
@@ -971,7 +1001,8 @@ void compare_search_update_latency(pipeann::DynamicSSDIndex<T, TagT> &index, T *
       uint64_t L_current = current_L.load();
       ofs << system_names[system_type] << "," << elapsed_sec << "," << L_current << "," << recall_at << ","
           << target_recall << "," << recall_pct << "," << search_qps << "," << p50_lat << "," << p90_lat << ","
-          << p99_lat << "," << mean_ios << "," << (rss_kb / 1024.0) << "," << disk_mb << "," << reorg_running << "\n";
+          << p99_lat << "," << mean_ios << "," << (rss_kb / 1024.0) << "," << (peak_rss_kb / 1024.0) << "," << disk_mb
+          << "," << reorg_running << "\n";
       ofs.flush();
 
       if (duration_sec > 0 && elapsed_sec >= duration_sec) {

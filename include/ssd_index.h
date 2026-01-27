@@ -233,7 +233,23 @@ namespace pipeann {
     // distance comparator
     std::shared_ptr<Distance<T>> dist_cmp;
 
+   private:
+    // DC-PDI优化控制：记录当前使用的搜索模式
+    // PIPE_SEARCH(2) = DC-PDI模式，会启用聚类感知分配和块感知剪枝优化
+    // BEAM_SEARCH(0) = IP-DiskANN/FreshDiskANN模式，使用标准算法
+    int search_mode_ = BEAM_SEARCH;
+
    public:
+    // 设置搜索模式，由DynamicSSDIndex在构造时调用
+    void set_search_mode(int mode) {
+      search_mode_ = mode;
+    }
+
+    // 获取搜索模式
+    int get_search_mode() const {
+      return search_mode_;
+    }
+
     // in-place update.
     int insert_in_place(const T *point, const TagT &tag, tsl::robin_set<uint32_t> *deletion_set = nullptr);
     void do_beam_search(const T *vec, uint32_t mem_L, uint32_t Lsize, const uint32_t beam_width,
@@ -637,10 +653,10 @@ namespace pipeann {
     /**
      * DC-PDI: 基于聚类感知的位置分配（论文3.2节）
      *
-     * 优化v2:
-     * - 限制候选页面数量，减少遍历开销
-     * - 使用简化的连接强度计算
-     * - 如果没有找到合适页面，快速回退到标准分配
+     * 优化v3:
+     * - 进一步限制候选页面数量到8个
+     * - 使用最简单的计数策略代替连接强度
+     * - 快速失败回退到标准分配
      *
      * @param n 需要分配的位置数
      * @param new_neighbors 新节点的邻居ID列表
@@ -656,70 +672,67 @@ namespace pipeann {
       int cur = 0;
       uint32_t threshold = (nnodes_per_sector + kIndexSizeFactor - 1) / kIndexSizeFactor;
 
-      // DC-PDI优化v2: 快速路径 - 如果邻居列表为空，直接使用标准分配
-      if (new_neighbors.empty() || neighbor_dists.empty()) {
-        // 回退到标准分配逻辑
+      // DC-PDI优化v3: 快速路径 - 邻居数量少于4个时直接使用标准分配
+      // 因为聚类感知对于少量邻居效果有限
+      if (new_neighbors.size() < 4 || neighbor_dists.empty()) {
         goto standard_alloc;
       }
 
       {
-        // DC-PDI优化v2: 限制处理的邻居数量，减少开销
-        // 只考虑距离最近的前16个邻居（通常已排序）
-        const size_t max_neighbors_to_consider = std::min(new_neighbors.size(), static_cast<size_t>(16));
+        // DC-PDI优化v3: 只考虑前8个最近邻
+        const size_t max_neighbors_to_consider = std::min(new_neighbors.size(), static_cast<size_t>(8));
 
-        // DC-PDI优化v2: 使用简化的连接强度计算
-        std::unordered_map<uint64_t, float> page_strength;
-        page_strength.reserve(max_neighbors_to_consider);
+        // DC-PDI优化v3: 使用简单计数代替连接强度
+        // 统计每个页面出现的次数，出现次数多的页面优先
+        std::unordered_map<uint64_t, uint32_t> page_count;
+        page_count.reserve(max_neighbors_to_consider);
 
-        for (size_t i = 0; i < max_neighbors_to_consider && i < neighbor_dists.size(); i++) {
+        for (size_t i = 0; i < max_neighbors_to_consider; i++) {
           uint64_t page = node_sector_no(new_neighbors[i]);
-          float dist = std::max(neighbor_dists[i], 1e-6f);
-          // 使用 1/dist 代替 1/dist^1.5
-          page_strength[page] += 1.0f / dist;
+          page_count[page]++;
         }
 
-        // DC-PDI优化v2: 如果没有有效页面，快速回退
-        if (page_strength.empty()) {
-          goto standard_alloc;
+        // DC-PDI优化v3: 快速选择最佳页面
+        // 找到出现次数最多的页面，如果有多个则选择第一个（距离最近的邻居所在页面）
+        uint64_t best_page = 0;
+        uint32_t best_count = 0;
+        uint64_t first_nbr_page = node_sector_no(new_neighbors[0]);
+        
+        for (auto &[page, count] : page_count) {
+          if (count > best_count || (count == best_count && page == first_nbr_page)) {
+            best_count = count;
+            best_page = page;
+          }
         }
 
-        // 2. 按连接强度排序
-        std::vector<std::pair<uint64_t, float>> sorted_pages(page_strength.begin(), page_strength.end());
-        std::sort(sorted_pages.begin(), sorted_pages.end(),
-                  [](const auto &a, const auto &b) { return a.second > b.second; });
-
-        // 3. 优先使用高连接强度页面的空槽
-        for (auto &[page, strength] : sorted_pages) {
-          if (cur >= n)
-            break;
-
+        // DC-PDI优化v3: 只尝试最佳页面，失败则直接回退
+        if (best_count >= 2) {  // 至少2个邻居在同一页面才值得尝试
 #ifdef NO_POLLUTE_ORIGINAL
-          if (page < loc_sector_no(init_num_pts)) {
-            continue;
-          }
+          if (best_page >= loc_sector_no(init_num_pts)) {
+#else
+          {
 #endif
+            auto st = sector_to_loc(best_page, 0);
+            auto ed = nnodes_per_sector == 0 ? st + 1 : st + nnodes_per_sector;
 
-          auto st = sector_to_loc(page, 0);
-          auto ed = nnodes_per_sector == 0 ? st + 1 : st + nnodes_per_sector;
+            uint32_t empty_count = 0;
+            for (uint32_t i = st; i < ed; i++) {
+              if (loc2id_[i] == kInvalidID)
+                empty_count++;
+            }
 
-          uint32_t empty_count = 0;
-          for (uint32_t i = st; i < ed; i++) {
-            if (loc2id_[i] == kInvalidID)
-              empty_count++;
-          }
+            if (empty_count >= threshold) {
+              if (empty_count < nnodes_per_sector) {
+                page_need_to_read.insert(best_page);
+              }
 
-          if (empty_count < threshold)
-            continue;  // 空槽不足
-
-          if (empty_count < nnodes_per_sector) {
-            page_need_to_read.insert(page);
-          }
-
-          for (uint32_t i = st; i < ed && cur < n; i++) {
-            if (loc2id_[i] == kInvalidID) {
-              loc2id_[i] = kAllocatedID;
-              ret.push_back(i);
-              cur++;
+              for (uint32_t i = st; i < ed && cur < n; i++) {
+                if (loc2id_[i] == kInvalidID) {
+                  loc2id_[i] = kAllocatedID;
+                  ret.push_back(i);
+                  cur++;
+                }
+              }
             }
           }
         }

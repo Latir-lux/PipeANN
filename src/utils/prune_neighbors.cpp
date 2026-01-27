@@ -241,11 +241,12 @@ namespace pipeann {
   }
 
   /**
-   * DC-PDI: 块感知邻居剪枝（论文4.2节）
+   * DC-PDI优化v3: 块感知邻居剪枝（论文4.2节）
    * 
-   * 对跨页边应用惩罚系数，优先保留页内边
-   * d'(v_new, u) = d(v_new, u) * β  if Page(u) ≠ Page(v_new)
-   *              = d(v_new, u)      otherwise
+   * 优化策略：
+   * 1. 使用更低的惩罚系数(1.05)减少对图质量的影响
+   * 2. 只对距离较远的候选应用惩罚（距离最近的几个保持不变）
+   * 3. 避免不必要的排序操作
    */
   template<typename T, typename TagT>
   void SSDIndex<T, TagT>::prune_neighbors_block_aware(
@@ -256,43 +257,36 @@ namespace pipeann {
     
     if (pool.empty()) return;
     
-    // DC-PDI优化v2: 进一步降低惩罚系数
-    // 分析：过高的惩罚系数导致图质量下降，增加搜索跳数
-    // 使用1.1的轻微惩罚，在保持图质量的同时提供一定的局部性优化
-    constexpr float kCrossPagePenalty = 1.1f;
+    // DC-PDI优化v3: 进一步降低惩罚系数到1.05
+    // 分析：1.1的惩罚仍然对搜索质量有影响
+    // 1.05是一个更温和的惩罚，主要作为tie-breaker使用
+    constexpr float kCrossPagePenalty = 1.05f;
     
-    // DC-PDI优化v2: 批量查询页面信息，减少锁竞争
-    // 预先获取所有节点的页面信息，避免在循环中多次调用id2loc
+    // DC-PDI优化v3: 只对排名靠后的候选应用惩罚
+    // 前range/2个最近邻不应用惩罚，保证核心邻居质量
     const size_t pool_size = pool.size();
+    const size_t skip_count = std::min(static_cast<size_t>(range / 2), pool_size);
     
-    // 优化: 使用位图标记跨页边（适用于小pool）
-    uint64_t cross_page_mask = 0;
-    const bool use_bitmap = pool_size <= 64;
+    // 首先对pool排序（如果还没排序）
+    std::sort(pool.begin(), pool.end());
     
-    // DC-PDI优化v2: 批量获取页面信息
-    if (use_bitmap) {
-      // 小pool: 使用位图
-      for (size_t i = 0; i < pool_size; i++) {
-        uint64_t nbr_page = node_sector_no(pool[i].id);
-        if (nbr_page != target_page) {
-          cross_page_mask |= (1ULL << i);
-          pool[i].distance *= kCrossPagePenalty;
-        }
-      }
-    } else {
-      // 大pool: 不使用位图，简化处理
-      // DC-PDI优化v2: 只处理前maxc个候选（与occlude_list一致）
-      const size_t process_count = std::min(pool_size, static_cast<size_t>(maxc));
-      for (size_t i = 0; i < process_count; i++) {
-        uint64_t nbr_page = node_sector_no(pool[i].id);
-        if (nbr_page != target_page) {
-          pool[i].distance *= kCrossPagePenalty;
-        }
+    // DC-PDI优化v3: 只处理skip_count之后的候选
+    // 前skip_count个保持原距离，后面的应用轻微惩罚
+    const size_t process_count = std::min(pool_size, static_cast<size_t>(maxc));
+    bool need_resort = false;
+    
+    for (size_t i = skip_count; i < process_count; i++) {
+      uint64_t nbr_page = node_sector_no(pool[i].id);
+      if (nbr_page != target_page) {
+        pool[i].distance *= kCrossPagePenalty;
+        need_resort = true;
       }
     }
     
-    // 重新排序
-    std::sort(pool.begin(), pool.end());
+    // DC-PDI优化v3: 只有当确实有距离被修改时才重新排序
+    if (need_resort) {
+      std::sort(pool.begin(), pool.end());
+    }
     
     // 使用原有剪枝逻辑
     std::vector<Neighbor> result;

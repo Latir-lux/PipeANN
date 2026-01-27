@@ -94,6 +94,9 @@ namespace pipeann {
 
     if (search_mode == BEAM_SEARCH || search_mode == PAGE_SEARCH || search_mode == PIPE_SEARCH) {
       this->search_mode = search_mode;
+      // DC-PDI优化控制：将搜索模式传递给底层SSDIndex
+      // 这样SSDIndex可以根据搜索模式决定是否使用DC-PDI特有的优化
+      _disk_index->set_search_mode(search_mode);
     } else {
       LOG(ERROR) << "Invalid search mode: " << search_mode
                  << ". Must be one of BEAM_SEARCH, PAGE_SEARCH, or PIPE_SEARCH.";

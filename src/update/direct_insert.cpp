@@ -78,34 +78,18 @@ namespace pipeann {
                          false, &page_ref);
     std::vector<uint32_t> new_nhood;
 
-    // DC-PDI优化v2: 块感知剪枝（论文4.2节）
+    // DC-PDI优化v3: 块感知剪枝（论文4.2节）
     // 优化点：
-    // 1. 只处理前16个最近邻来计算目标页面
-    // 2. 使用简化的连接强度计算
+    // 1. 使用最简单的策略：选择最近邻所在页面作为目标页面
+    // 2. 减少不必要的map和循环操作
+    // 3. 只有在DC-PDI模式（PIPE_SEARCH）下才启用，确保不影响IP-DiskANN/FreshDiskANN
 #ifdef ENABLE_BLOCK_AWARE_PRUNE
-    uint64_t target_page = 0;
-    // DC-PDI优化v2: 只在有足够邻居时使用块感知剪枝
-    const size_t min_neighbors_for_block_aware = 4;
-    if (!page_ref.empty() && exp_node_info.size() >= min_neighbors_for_block_aware) {
-      // DC-PDI优化v2: 只考虑前16个最近邻
-      const size_t max_to_consider = std::min(exp_node_info.size(), static_cast<size_t>(16));
-      std::unordered_map<uint64_t, float> page_strength;
-      page_strength.reserve(max_to_consider);
-
-      for (size_t i = 0; i < max_to_consider; i++) {
-        auto &nbr = exp_node_info[i];
-        uint64_t page = node_sector_no(nbr.id);
-        float dist = std::max(nbr.distance, 1e-6f);
-        page_strength[page] += 1.0f / dist;
-      }
-
-      float max_strength = 0;
-      for (auto &[page, strength] : page_strength) {
-        if (strength > max_strength) {
-          max_strength = strength;
-          target_page = page;
-        }
-      }
+    const size_t min_neighbors_for_block_aware = 6;
+    // 检查是否为DC-PDI模式（PIPE_SEARCH = 2）
+    const bool is_dcpdi = (this->get_search_mode() == PIPE_SEARCH);
+    if (is_dcpdi && !page_ref.empty() && exp_node_info.size() >= min_neighbors_for_block_aware) {
+      // DC-PDI优化v3: 直接使用最近邻（第一个）所在页面作为目标页面
+      uint64_t target_page = node_sector_no(exp_node_info[0].id);
       prune_neighbors_block_aware(coord_map, exp_node_info, new_nhood, target_page);
     } else {
       prune_neighbors(coord_map, exp_node_info, new_nhood);
@@ -133,27 +117,41 @@ namespace pipeann {
     cur_loc++;  // for target ID, atomic update.
     set_loc2id(target_id, target_id);
 #else
-    // DC-PDI优化v2: 使用聚类感知位置分配（论文3.2节）
-    // 优化点：使用哈希表加速距离查找，从O(n²)降到O(n)
-    std::vector<float> neighbor_dists;
-    neighbor_dists.reserve(new_nhood.size());
+    // DC-PDI优化v3: 使用聚类感知位置分配（论文3.2节）
+    // 只有在DC-PDI模式（PIPE_SEARCH）下才启用，确保不影响IP-DiskANN/FreshDiskANN
+    std::vector<uint64_t> locs;
+    // 检查是否为DC-PDI模式（PIPE_SEARCH = 2）
+    const bool is_dcpdi = (this->get_search_mode() == PIPE_SEARCH);
+    if (is_dcpdi) {
+      // DC-PDI模式：使用聚类感知位置分配
+      std::vector<float> neighbor_dists;
+      neighbor_dists.reserve(new_nhood.size());
 
-    // DC-PDI优化v2: 预构建ID到距离的映射表
-    tsl::robin_map<uint32_t, float> id_to_dist;
-    id_to_dist.reserve(exp_node_info.size());
-    for (auto &info : exp_node_info) {
-      id_to_dist[info.id] = info.distance;
-    }
-
-    for (auto &nbr_id : new_nhood) {
-      auto it = id_to_dist.find(nbr_id);
-      if (it != id_to_dist.end()) {
-        neighbor_dists.push_back(it->second);
-      } else {
-        neighbor_dists.push_back(std::numeric_limits<float>::max());
+      // 预构建ID到距离的映射表
+      tsl::robin_map<uint32_t, float> id_to_dist;
+      id_to_dist.reserve(exp_node_info.size());
+      for (auto &info : exp_node_info) {
+        id_to_dist[info.id] = info.distance;
       }
+
+      for (auto &nbr_id : new_nhood) {
+        auto it = id_to_dist.find(nbr_id);
+        if (it != id_to_dist.end()) {
+          neighbor_dists.push_back(it->second);
+        } else {
+          neighbor_dists.push_back(std::numeric_limits<float>::max());
+        }
+      }
+      locs = this->alloc_loc_clustering_aware(new_nhood.size() + 1, new_nhood, neighbor_dists, pages_need_to_read);
+    } else {
+      // Baseline模式（IP-DiskANN/FreshDiskANN）：使用标准位置分配
+      std::set<uint64_t> hint_pages;
+      for (auto &nbr : new_nhood) {
+        hint_pages.insert(node_sector_no(nbr));
+      }
+      std::vector<uint64_t> hint_pages_vec(hint_pages.begin(), hint_pages.end());
+      locs = this->alloc_loc(new_nhood.size() + 1, hint_pages_vec, pages_need_to_read);
     }
-    auto locs = this->alloc_loc_clustering_aware(new_nhood.size() + 1, new_nhood, neighbor_dists, pages_need_to_read);
 #endif
 
     std::set<uint64_t> pages_to_rmw_set;

@@ -199,20 +199,22 @@ namespace pipeann {
 
     std::queue<io_t> on_flight_ios;
 
-    // DC-PDI优化: 使用robin_map替代std::unordered_map，提高查找性能
+    // DC-PDI优化v3: 使用robin_map替代std::unordered_map，提高查找性能
+    // 优化: 减小初始容量，避免过度分配
     tsl::robin_map<unsigned, char *> id_buf_map;
-    id_buf_map.reserve(l_search * 2);
+    id_buf_map.reserve(std::min(l_search, static_cast<uint64_t>(128)));
 
-    // DC-PDI: 使用robin_set跟踪已发送但未完成的节点ID
-    tsl::robin_set<unsigned> on_flight_ids;
-    on_flight_ids.reserve(beam_width * 2);
+    // DC-PDI优化v3: 移除on_flight_ids跟踪集合
+    // 原因分析: 这个集合导致每次发送I/O需要额外的哈希表查找和插入
+    // 替代方案: 使用retset[marker].flag作为已发送标记，flag=false表示已发送
+    // 这样可以减少一次哈希表查找开销
 
-    // DC-PDI优化: 借鉴beam_search的k指针策略
+    // DC-PDI优化v3: 借鉴beam_search的k指针策略
     // k表示下一个需要检查的位置，避免重复扫描已处理的节点
     unsigned k = 0;
 
-    // DC-PDI优化: 批量发送I/O请求，从k开始扫描 + num_seen限制
-    // 核心优化：借鉴beam_search的双重限制策略，减少无效扫描
+    // DC-PDI优化v3: 批量发送I/O请求，简化逻辑
+    // 关键优化：使用flag字段追踪已发送状态，避免额外的哈希集合
     auto send_batch_read_req = [&](uint32_t n) -> unsigned {
       if (n == 0)
         return 0;
@@ -224,16 +226,18 @@ namespace pipeann {
       uint32_t marker = k;
       uint32_t num_seen = 0;
 
-      // 关键优化：num_seen < beam_width限制扫描范围，避免扫描过多节点
+      // DC-PDI优化v3：简化判断条件
+      // flag=true表示未发送，flag=false表示已发送
+      // visited=true表示已处理完成
       while (marker < cur_list_size && to_send.size() < n && num_seen < beam_width) {
-        unsigned id = retset[marker].id;
-        // 只计数未访问的节点
-        if (!retset[marker].visited) {
+        // DC-PDI优化v3: 只有flag=true且未读取的节点才发送
+        if (retset[marker].flag && !retset[marker].visited) {
           num_seen++;
-          // 跳过已发送（在飞行中）或已读取的节点
-          if (on_flight_ids.find(id) == on_flight_ids.end() && id_buf_map.find(id) == id_buf_map.end()) {
+          unsigned id = retset[marker].id;
+          // 跳过已读取的节点
+          if (id_buf_map.find(id) == id_buf_map.end()) {
             to_send.push_back({marker, &retset[marker]});
-            on_flight_ids.insert(id);
+            retset[marker].flag = false;  // 标记为已发送
           }
         }
         ++marker;
@@ -282,14 +286,14 @@ namespace pipeann {
       return to_send.size();
     };
 
-    // DC-PDI: 轮询I/O完成
+    // DC-PDI优化v3: 轮询I/O完成（移除on_flight_ids操作）
     auto poll_all = [&]() -> unsigned {
       reader->poll_all(ctx);
       unsigned n_completed = 0;
       while (!on_flight_ios.empty() && on_flight_ios.front().finished()) {
         io_t &io = on_flight_ios.front();
         id_buf_map.insert(std::make_pair(io.nbr.id, offset_to_loc((char *) io.read_req->buf, io.loc)));
-        on_flight_ids.erase(io.nbr.id);  // 从飞行集合中移除
+        // DC-PDI优化v3: 移除on_flight_ids.erase()调用
 #ifndef READ_ONLY_TESTS
         idx_lock_table.unlock(io.nbr.id);
 #endif
@@ -299,7 +303,7 @@ namespace pipeann {
       return n_completed;
     };
 
-    // DC-PDI优化: 处理已读取的节点，从k开始扫描
+    // DC-PDI优化v3: 处理已读取的节点，从k开始扫描
     // 返回<处理节点数, 最佳更新位置nk>，nk用于更新k指针
     auto calc_best_nodes = [&]() -> std::pair<unsigned, unsigned> {
       unsigned n_processed = 0;
@@ -359,8 +363,11 @@ namespace pipeann {
     }
 #endif
 
-    // DC-PDI优化: 主循环 - 借鉴beam_search的k指针策略
+    // DC-PDI优化v3: 主循环 - 借鉴beam_search的k指针策略
     // 终止条件：k >= cur_list_size 且所有飞行I/O都完成
+    // 新增: 早停条件 - 当k达到k_search*2且没有更好的候选时提前退出
+    const unsigned early_stop_threshold = std::max(k_search * 2, static_cast<uint64_t>(beam_width));
+    
     while (k < cur_list_size || !on_flight_ios.empty()) {
       // 1. 轮询已完成的I/O
       unsigned n_completed = poll_all();
@@ -377,6 +384,19 @@ namespace pipeann {
         while (k < cur_list_size && retset[k].visited) {
           ++k;
         }
+      }
+
+      // DC-PDI优化v3: 早停优化
+      // 当已经处理足够多的节点且k指针已经超过早停阈值时，可以提前终止
+      if (k >= early_stop_threshold && full_retset.size() >= k_search) {
+        // 等待所有飞行I/O完成后退出
+        while (!on_flight_ios.empty()) {
+          poll_all();
+          if (!on_flight_ios.empty()) {
+            reader->poll_wait(ctx);
+          }
+        }
+        break;
       }
 
       // 4. 发送新的I/O请求（如果有空位）

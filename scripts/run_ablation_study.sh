@@ -401,31 +401,45 @@ run_exp1_clustering() {
   echo "######################################"
   echo ""
 
-  local exp_index=$(prepare_base_index ${BASE_RATIO})
-
-  # 判断是否复用了run_system_comparison.sh的exp1索引
+  # 直接复用run_system_comparison.sh生成的所有文件，不进行任何文件生成
   local base_pct
   base_pct=$(python3 -c "print(int(round(${BASE_RATIO} * 100)))")
-  local exp1_index_base="${INDEX_BASE}_exp1_base${base_pct}"
 
-  local exp1_gt
-  if [ "${exp_index}" = "${exp1_index_base}" ]; then
-    # 复用了exp1索引，同时复用GT文件
-    local gt_ext="${GT_FILE##*.}"
-    local gt_prefix="${GT_FILE%.*}"
-    local exp1_gt_k=100
-    exp1_gt="${gt_prefix}_exp1_base${base_pct}_k${exp1_gt_k}.${gt_ext}"
+  # 使用run_system_comparison.sh的exp1索引路径
+  local exp_index="${INDEX_BASE}_exp1_base${base_pct}"
 
-    if [ ! -f "${exp1_gt}" ]; then
-      echo "Error: GT file not found for exp1 index: ${exp1_gt}" >&2
-      echo "Please run run_system_comparison.sh first to generate it" >&2
-      exit 1
-    fi
-    echo "Reusing GT from run_system_comparison.sh: ${exp1_gt}" >&2
-  else
-    # 使用ablation专用索引，生成对应的GT文件
-    exp1_gt=$(prepare_exp1_gt ${BASE_RATIO})
+  # 使用run_system_comparison.sh的GT文件路径
+  local gt_ext="${GT_FILE##*.}"
+  local gt_prefix="${GT_FILE%.*}"
+  local exp1_gt="${gt_prefix}_exp1_base${base_pct}_k100.${gt_ext}"
+
+  # 验证所有必需文件存在
+  if [ ! -f "${exp_index}_disk.index" ]; then
+    echo "Error: exp1 index not found: ${exp_index}_disk.index" >&2
+    echo "Please run run_system_comparison.sh first to generate it" >&2
+    exit 1
   fi
+
+  if [ ! -f "${exp_index}_pq_compressed.bin" ]; then
+    echo "Error: exp1 PQ compressed file not found: ${exp_index}_pq_compressed.bin" >&2
+    exit 1
+  fi
+
+  if [ ! -f "${exp_index}_pq_pivots.bin" ]; then
+    echo "Error: exp1 PQ pivots file not found: ${exp_index}_pq_pivots.bin" >&2
+    exit 1
+  fi
+
+  if [ ! -f "${exp1_gt}" ]; then
+    echo "Error: exp1 GT file not found: ${exp1_gt}" >&2
+    echo "Please run run_system_comparison.sh first to generate it" >&2
+    exit 1
+  fi
+
+  echo "Reusing files from run_system_comparison.sh:" >&2
+  echo "  Index: ${exp_index}_disk.index" >&2
+  echo "  GT: ${exp1_gt}" >&2
+  echo "  PQ: ${exp_index}_pq_compressed.bin" >&2
 
   ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${exp1_gt}" \
     "${INSERT_FILE}" 1 "${RESULTS_DIR}" \

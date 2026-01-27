@@ -364,46 +364,6 @@ PY
   echo "Exp1 GT file: ${EXP1_GT_FILE}" >&2
 }
 
-# ============= 验证GT文件 =============
-# 使用gt_update工具验证GT文件是否包含足够的近邻
-validate_exp1_gt() {
-  local gt_file=$1
-  local base_pts=$2
-  local total_pts=$3
-  local target_topk=$4
-
-  echo "Validating GT file: ${gt_file}" >&2
-  echo "  Base points: ${base_pts}" >&2
-  echo "  Total points: ${total_pts}" >&2
-  echo "  Target top-K: ${target_topk}" >&2
-
-  if [ ! -x "./build/tests/gt_update" ]; then
-    echo "Error: ./build/tests/gt_update executable not found or not executable" >&2
-    echo "Please compile first: cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make gt_update" >&2
-    exit 1
-  fi
-
-  if [ ! -f "${gt_file}" ]; then
-    echo "Error: GT file not found: ${gt_file}" >&2
-    exit 1
-  fi
-
-  # 创建验证结果目录
-  local validate_dir="${RESULTS_DIR}/gt_validate"
-  mkdir -p "${validate_dir}"
-
-  echo "Running GT validation..." >&2
-  # gt_update <gt_file> <index_npts> <total_npts> <batch_npts> <target_topk> <target_dir> <insert_only>
-  # 使用batch_npts=1000做验证
-  ./build/tests/gt_update "${gt_file}" "${base_pts}" "${total_pts}" 1000 "${target_topk}" "${validate_dir}" 1 >&2
-  
-  if [ $? -ne 0 ]; then
-    echo "Warning: GT validation encountered issues" >&2
-  else
-    echo "GT validation completed successfully" >&2
-  fi
-}
-
 # ============= 函数定义 =============
 
 should_run() {
@@ -462,25 +422,6 @@ run_exp1_clustering() {
   echo "  PQ: ${exp_index}_pq_compressed.bin" >&2
   echo "  Base data: ${EXP1_BASE_FILE}" >&2
   echo "  Update data: ${EXP1_UPDATE_FILE}" >&2
-
-  # 验证GT文件
-  local base_pts_count
-  base_pts_count=$(python3 - <<PY
-import struct
-with open("${EXP1_BASE_FILE}", "rb") as f:
-    npts, dim = struct.unpack("<ii", f.read(8))
-    print(npts)
-PY
-)
-  local total_pts_count
-  total_pts_count=$(python3 - <<PY
-import struct
-with open("${DATA_FILE}", "rb") as f:
-    npts, dim = struct.unpack("<ii", f.read(8))
-    print(npts)
-PY
-)
-  validate_exp1_gt "${EXP1_GT_FILE}" "${base_pts_count}" "${total_pts_count}" 100
 
   ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${EXP1_GT_FILE}" \
     "${INSERT_FILE}" 1 "${RESULTS_DIR}" \

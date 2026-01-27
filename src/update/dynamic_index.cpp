@@ -458,15 +458,6 @@ namespace pipeann {
       active_deleted_snapshot = deletion_sets[active_delete_set];
     }
 
-    tsl::robin_set<uint32_t> merged_delete_set_ids;
-    merged_delete_set_ids.reserve(deleted_set_snapshot.size() + active_deleted_snapshot.size());
-    for (const auto &tag : deleted_set_snapshot) {
-      merged_delete_set_ids.insert(static_cast<uint32_t>(tag));
-    }
-    for (const auto &tag : active_deleted_snapshot) {
-      merged_delete_set_ids.insert(static_cast<uint32_t>(tag));
-    }
-
     auto merge_nbr = create_neighbor_handler(_disk_index->nbr_handler);
     auto merge_reader = std::shared_ptr<AlignedFileReader>(new LinuxAlignedFileReader());
     auto merge_index = std::unique_ptr<SSDIndex<T, TagT>>(
@@ -480,16 +471,49 @@ namespace pipeann {
     if (pending_buffer != nullptr) {
       tsl::robin_set<TagT> active_tags;
       pending_buffer->get_active_tags(active_tags);
+
+      std::string pending_data = _disk_index_prefix_out + "_pending.bin";
+      std::string pending_tags = _disk_index_prefix_out + "_pending.tags.bin";
+
+      std::ofstream data_writer;
+      std::ofstream tags_writer;
+      open_file_to_write(data_writer, pending_data);
+      open_file_to_write(tags_writer, pending_tags);
+
+      int npts_i32 = 0;
+      int dim_i32 = static_cast<int>(_dim);
+      int tag_dim_i32 = 1;
+      data_writer.write(reinterpret_cast<const char *>(&npts_i32), sizeof(int));
+      data_writer.write(reinterpret_cast<const char *>(&dim_i32), sizeof(int));
+      tags_writer.write(reinterpret_cast<const char *>(&npts_i32), sizeof(int));
+      tags_writer.write(reinterpret_cast<const char *>(&tag_dim_i32), sizeof(int));
+
       std::vector<T> buf_vec(_buffer_aligned_dim);
       for (auto tag : active_tags) {
-        if (merged_delete_set_ids.find(static_cast<uint32_t>(tag)) != merged_delete_set_ids.end()) {
+        if (deleted_set_snapshot.find(tag) != deleted_set_snapshot.end()) {
+          continue;
+        }
+        if (active_deleted_snapshot.find(tag) != active_deleted_snapshot.end()) {
           continue;
         }
         if (pending_buffer->get_vector_by_tag(tag, buf_vec.data()) != 0) {
           continue;
         }
-        merge_index->insert_in_place(buf_vec.data(), tag, &merged_delete_set_ids);
+        data_writer.write(reinterpret_cast<const char *>(buf_vec.data()), _dim * sizeof(T));
+        tags_writer.write(reinterpret_cast<const char *>(&tag), sizeof(TagT));
+        npts_i32++;
       }
+
+      data_writer.seekp(0);
+      tags_writer.seekp(0);
+      data_writer.write(reinterpret_cast<const char *>(&npts_i32), sizeof(int));
+      data_writer.write(reinterpret_cast<const char *>(&dim_i32), sizeof(int));
+      tags_writer.write(reinterpret_cast<const char *>(&npts_i32), sizeof(int));
+      tags_writer.write(reinterpret_cast<const char *>(&tag_dim_i32), sizeof(int));
+
+      data_writer.close();
+      tags_writer.close();
+      LOG(INFO) << "Persisted pending buffer to " << pending_data;
     }
 
     SSDIndex<T, TagT> *old_index = nullptr;

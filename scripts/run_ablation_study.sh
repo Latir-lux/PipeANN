@@ -429,16 +429,6 @@ if should_run "4"; then
   run_exp4_scalability
 fi
 
-# ============= 生成可视化图表 =============
-echo ""
-echo ">>> 生成消融实验图表 <<<"
-if [ -f "./draw/plot_ablation_study.py" ]; then
-  python3 ./draw/plot_ablation_study.py ${RESULTS_DIR}
-  echo "图表已生成: ${RESULTS_DIR}/figures/"
-else
-  echo "Warning: plot_ablation_study.py not found, skipping visualization"
-fi
-
 # ============= 完成 =============
 echo ""
 echo "######################################"

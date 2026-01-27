@@ -458,22 +458,20 @@ namespace pipeann {
       active_deleted_snapshot = deletion_sets[active_delete_set];
     }
 
-    auto merge_nbr = create_neighbor_handler(_disk_index->nbr_handler);
-    auto merge_reader = std::shared_ptr<AlignedFileReader>(new LinuxAlignedFileReader());
-    auto merge_index = std::unique_ptr<SSDIndex<T, TagT>>(
-        new SSDIndex<T, TagT>(this->_dist_metric, merge_reader, merge_nbr.release(), true, &_paras_disk));
-    merge_index->load(_disk_index_prefix_in.c_str(), merge_threads, true, _use_page_search);
-
-    merge_index->merge_deletes(_disk_index_prefix_in, _disk_index_prefix_out, deleted_tags_snapshot,
-                               deleted_set_snapshot, merge_threads, n_sampled_nbrs);
-    merge_index->reload(_disk_index_prefix_out.c_str(), merge_threads);
+    {
+      std::unique_lock<std::shared_timed_mutex> lock(_merge_lock);
+      _disk_index->merge_deletes(_disk_index_prefix_in, _disk_index_prefix_out, deleted_tags_snapshot,
+                                 deleted_set_snapshot, merge_threads, n_sampled_nbrs);
+      std::swap(_disk_index_prefix_in, _disk_index_prefix_out);
+      _disk_index->reload(_disk_index_prefix_in.c_str(), merge_threads);
+    }
 
     if (pending_buffer != nullptr) {
       tsl::robin_set<TagT> active_tags;
       pending_buffer->get_active_tags(active_tags);
 
-      std::string pending_data = _disk_index_prefix_out + "_pending.bin";
-      std::string pending_tags = _disk_index_prefix_out + "_pending.tags.bin";
+      std::string pending_data = _disk_index_prefix_in + "_pending.bin";
+      std::string pending_tags = _disk_index_prefix_in + "_pending.tags.bin";
 
       std::ofstream data_writer;
       std::ofstream tags_writer;
@@ -514,20 +512,6 @@ namespace pipeann {
       data_writer.close();
       tags_writer.close();
       LOG(INFO) << "Persisted pending buffer to " << pending_data;
-    }
-
-    SSDIndex<T, TagT> *old_index = nullptr;
-    {
-      std::unique_lock<std::shared_timed_mutex> lock(_merge_lock);
-      old_index = _disk_index;
-      _disk_index = merge_index.release();
-      reader = merge_reader;
-      std::swap(_disk_index_prefix_in, _disk_index_prefix_out);
-      _buffer_pending.reset();
-    }
-
-    if (old_index != nullptr) {
-      delete old_index;
     }
 
     _merge_in_progress.store(false, std::memory_order_relaxed);

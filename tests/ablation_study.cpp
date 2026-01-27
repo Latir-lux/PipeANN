@@ -43,6 +43,8 @@
 #include <chrono>
 #include <limits>
 #include <mutex>
+#include <map>
+#include <sstream>
 
 #include "aux_utils.h"
 #include "index.h"
@@ -191,7 +193,7 @@ void run_clustering_ablation_exp(const std::string &index_prefix,
     // 创建动态索引
     pipeann::Parameters paras;
     uint64_t L_disk = L_values.empty() ? DEFAULT_L_DISK : L_values.front();
-    paras.set(0, static_cast<uint32_t>(L_disk), 384, 1.2f, num_threads, true, DEFAULT_BEAM_WIDTH);
+    paras.set(0, static_cast<uint32_t>(L_disk), 384, 1.2f, static_cast<uint32_t>(num_threads), true, DEFAULT_BEAM_WIDTH);
 
     pipeann::Metric metric = pipeann::Metric::L2;
     auto *dist_cmp = pipeann::get_distance_function<T>(metric);
@@ -387,7 +389,7 @@ void run_reorganization_ablation_exp(const std::string &index_prefix,
     }
 
     pipeann::Parameters paras;
-    paras.set(0, DEFAULT_L_DISK, 384, 1.2f, num_threads, true, DEFAULT_BEAM_WIDTH);
+    paras.set(0, DEFAULT_L_DISK, 384, 1.2f, static_cast<uint32_t>(num_threads), true, DEFAULT_BEAM_WIDTH);
 
     pipeann::Metric metric = pipeann::Metric::L2;
     auto *dist_cmp = pipeann::get_distance_function<T>(metric);
@@ -600,10 +602,11 @@ void run_pipeline_ablation_exp(const std::string &index_prefix,
     auto nbr_handler = new pipeann::PQNeighbor<T>();
 
     pipeann::SSDIndex<T, TagT> index(pipeann::L2, reader, nbr_handler, false);
-    int load_result = index.load(index_prefix.c_str(), num_threads, true, false);
+    int load_result = index.load(index_prefix.c_str(), static_cast<uint32_t>(num_threads), true, false);
 
     if (load_result != 0) {
       std::cerr << "Failed to load index" << std::endl;
+      delete nbr_handler;
       continue;
     }
 
@@ -747,7 +750,7 @@ void run_scalability_exp(const std::string &index_prefix,
     }
 
     pipeann::Parameters paras;
-    paras.set(0, DEFAULT_L_DISK, 384, 1.2f, num_threads + 4, true, DEFAULT_BEAM_WIDTH);
+    paras.set(0, DEFAULT_L_DISK, 384, 1.2f, static_cast<uint32_t>(num_threads + 4), true, DEFAULT_BEAM_WIDTH);
 
     pipeann::Metric metric = pipeann::Metric::L2;
     auto *dist_cmp = pipeann::get_distance_function<T>(metric);

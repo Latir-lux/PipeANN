@@ -130,11 +130,11 @@ case $DATASET in
   deep)
     DATA_TYPE="float"
     DATA_DIM=96
-    DATA_FILE="${BASE_DIR}/deep/deep1M_base.bin"
-    QUERY_FILE="${BASE_DIR}/deep/deep1M_query.bin"
-    GT_FILE="${BASE_DIR}/deep/gt_10.bin"
-    INSERT_FILE="${BASE_DIR}/deep/deep_learn.bin"
-    INDEX_BASE="${BASE_DIR}/deep/indices/deep-100m"
+    DATA_FILE="${BASE_DIR}/deep1b/deep1b_base.bin"
+    QUERY_FILE="${BASE_DIR}/deep1b/deep1b_query.bin"
+    GT_FILE="${BASE_DIR}/deep1b/deep1b_gt.bin"
+    INSERT_FILE="${BASE_DIR}/deep1b/deep1b_learn.bin"
+    INDEX_BASE="${BASE_DIR}/deep1b/indices/deep-1b"
     ;;
   gist)
     DATA_TYPE="uint8"
@@ -143,7 +143,7 @@ case $DATASET in
     QUERY_FILE="${BASE_DIR}/gist/gist_query.bin"
     GT_FILE="${BASE_DIR}/gist/gist_gt.bin"
     INSERT_FILE="${BASE_DIR}/gist/gist_learn.bin"
-    INDEX_BASE="${BASE_DIR}/gist/gist"
+    INDEX_BASE="${BASE_DIR}/gist/indices/gist"
     ;;
   *)
     echo "Unknown dataset: $DATASET"

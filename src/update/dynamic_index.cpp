@@ -85,14 +85,15 @@ namespace pipeann {
     _disk_index_prefix_in = disk_index_prefix_shadow;
 #endif
 
-    if (search_mode == BEAM_SEARCH || search_mode == PAGE_SEARCH || search_mode == PIPE_SEARCH) {
+    if (search_mode == BEAM_SEARCH || search_mode == PAGE_SEARCH || search_mode == PIPE_SEARCH || search_mode == BASELINE_SEARCH) {
       this->search_mode = search_mode;
       // DC-PDI优化控制：将搜索模式传递给底层SSDIndex
       // 这样SSDIndex可以根据搜索模式决定是否使用DC-PDI特有的优化
+      // BASELINE_SEARCH用于消融实验，强制使用标准alloc_loc分配
       _disk_index->set_search_mode(search_mode);
     } else {
       LOG(ERROR) << "Invalid search mode: " << search_mode
-                 << ". Must be one of BEAM_SEARCH, PAGE_SEARCH, or PIPE_SEARCH.";
+                 << ". Must be one of BEAM_SEARCH, PAGE_SEARCH, PIPE_SEARCH, or BASELINE_SEARCH.";
       exit(-1);
     }
     bool use_page_search = (search_mode == PAGE_SEARCH);
@@ -212,7 +213,8 @@ namespace pipeann {
       } else if (search_mode == PAGE_SEARCH) {
         n = _disk_index->page_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
                                      beam_width, stats);
-      } else if (search_mode == PIPE_SEARCH) {
+      } else if (search_mode == PIPE_SEARCH || search_mode == BASELINE_SEARCH) {
+        // BASELINE_SEARCH使用与PIPE_SEARCH相同的搜索算法，仅分配策略不同
         n = _disk_index->pipe_search(query, search_L, mem_L, search_L, result_tags.data(), result_distances.data(),
                                      beam_width, stats);
       }
@@ -247,7 +249,8 @@ namespace pipeann {
     } else if (search_mode == PAGE_SEARCH) {
       base_n = _disk_index->page_search(query, search_L, mem_L, search_L, base_tags.data(), base_dists.data(),
                                         beam_width, stats);
-    } else if (search_mode == PIPE_SEARCH) {
+    } else if (search_mode == PIPE_SEARCH || search_mode == BASELINE_SEARCH) {
+      // BASELINE_SEARCH使用与PIPE_SEARCH相同的搜索算法，仅分配策略不同
       base_n = _disk_index->pipe_search(query, search_L, mem_L, search_L, base_tags.data(), base_dists.data(),
                                         beam_width, stats);
     }

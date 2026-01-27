@@ -33,7 +33,7 @@
 
 constexpr int kIndexSizeFactor = 2;
 
-enum SearchMode { BEAM_SEARCH = 0, PAGE_SEARCH = 1, PIPE_SEARCH = 2, CORO_SEARCH = 3 };
+enum SearchMode { BEAM_SEARCH = 0, PAGE_SEARCH = 1, PIPE_SEARCH = 2, CORO_SEARCH = 3, BASELINE_SEARCH = 4 };
 
 namespace pipeann {
   template<typename T, typename TagT = uint32_t>

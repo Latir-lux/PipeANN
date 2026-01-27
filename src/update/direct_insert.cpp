@@ -63,8 +63,11 @@ namespace pipeann {
     nbr_handler->insert(point, target_id);
 
     // DC-PDI优化控制：检查是否为DC-PDI模式（PIPE_SEARCH = 2）
+    // BASELINE_SEARCH (4) 用于消融实验，强制使用标准alloc_loc分配
     // 在函数开始处声明一次，避免重复声明错误
-    const bool is_dcpdi = (this->get_search_mode() == PIPE_SEARCH);
+    const int current_search_mode = this->get_search_mode();
+    const bool is_dcpdi = (current_search_mode == PIPE_SEARCH);
+    const bool is_baseline = (current_search_mode == BASELINE_SEARCH);
 
     std::vector<Neighbor> exp_node_info;
     tsl::robin_map<uint32_t, T *> coord_map;
@@ -120,9 +123,11 @@ namespace pipeann {
     set_loc2id(target_id, target_id);
 #else
     // DC-PDI优化v3: 使用聚类感知位置分配（论文3.2节）
-    // 只有在DC-PDI模式（PIPE_SEARCH）下才启用，确保不影响IP-DiskANN/FreshDiskANN
+    // PIPE_SEARCH: 使用聚类感知分配（DC-PDI）
+    // BASELINE_SEARCH: 强制使用标准alloc_loc（消融实验对照组）
+    // 其他模式: 使用标准分配（IP-DiskANN/FreshDiskANN）
     std::vector<uint64_t> locs;
-    if (is_dcpdi) {
+    if (is_dcpdi && !is_baseline) {
       // DC-PDI模式：使用聚类感知位置分配
       std::vector<float> neighbor_dists;
       neighbor_dists.reserve(new_nhood.size());
@@ -144,7 +149,7 @@ namespace pipeann {
       }
       locs = this->alloc_loc_clustering_aware(new_nhood.size() + 1, new_nhood, neighbor_dists, pages_need_to_read);
     } else {
-      // Baseline模式（IP-DiskANN/FreshDiskANN）：使用标准位置分配
+      // Baseline模式（IP-DiskANN/FreshDiskANN/BASELINE_SEARCH）：使用标准位置分配
       std::set<uint64_t> hint_pages;
       for (auto &nbr : new_nhood) {
         hint_pages.insert(node_sector_no(nbr));

@@ -198,18 +198,11 @@ void run_clustering_ablation_exp(const std::string &index_prefix,
     pipeann::Metric metric = pipeann::Metric::L2;
     auto *dist_cmp = pipeann::get_distance_function<T>(metric);
     
-    // 使用PIPE_SEARCH模式
+    // mode=0: 使用PIPE_SEARCH（启用聚类感知分配）
+    // mode=1: 使用BASELINE_SEARCH（使用标准alloc_loc分配）
+    int search_mode = (mode == 0) ? PIPE_SEARCH : BASELINE_SEARCH;
     pipeann::DynamicSSDIndex<T, TagT> dyn_index(paras, mode_index_prefix, mode_index_prefix + "_merge",
-                                                 dist_cmp, metric, PIPE_SEARCH, false);
-
-    // 设置聚类模式标志（通过运行时配置）
-    // mode=0: 使用聚类分配
-    // mode=1: 使用随机分配（追加到末尾）
-    if (mode == 1) {
-      // 禁用聚类分配 - 设置环境变量或使用配置
-      // 注意：实际项目中需要在SSDIndex中添加运行时开关
-      // 这里通过模拟来展示预期行为
-    }
+                                                 dist_cmp, metric, search_mode, false);
 
     // 执行插入操作
     std::cout << "Inserting " << total_inserts << " vectors..." << std::endl;

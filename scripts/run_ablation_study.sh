@@ -235,21 +235,50 @@ prepare_base_index() {
   local base_ratio=$1
   local base_pct
   base_pct=$(python3 -c "print(int(round(${base_ratio} * 100)))")
-  
+
+  # 构造base data文件路径（与prepare_exp1_gt保持一致）
+  local base_data="${DATA_FILE%.*}_exp1_base${base_pct}.bin"
+
+  # 构造run_system_comparison.sh生成的exp1索引路径（用于复用）
+  local exp1_index_base="${INDEX_BASE}_exp1_base${base_pct}"
+
+  # 优先检查并复用run_system_comparison.sh生成的exp1索引
+  if [ -f "${exp1_index_base}_disk.index" ]; then
+    # 验证相关文件都存在
+    if [ -f "${base_data}" ] && [ -f "${exp1_index_base}_pq_compressed.bin" ] && [ -f "${exp1_index_base}_pq_pivots.bin" ]; then
+      echo "Reusing exp1 index from run_system_comparison.sh: ${exp1_index_base}" >&2
+      echo "${exp1_index_base}"
+      return
+    else
+      echo "Warning: exp1 index exists but data files incomplete, will rebuild..." >&2
+    fi
+  fi
+
   local base_index="${INDEX_BASE}_ablation_base${base_pct}"
-  
+
+  # 如果索引存在，但base data文件不存在，说明索引是基于错误的数据集构建的
+  # 需要重新构建索引以确保与GT文件匹配
+  if [ -f "${base_index}_disk.index" ] && [ ! -f "${base_data}" ]; then
+    echo "Warning: Index exists but base data file missing: ${base_data}" >&2
+    echo "Removing stale index to rebuild with correct data..." >&2
+    rm -f "${base_index}_disk.index"
+    rm -f "${base_index}_pq_compressed.bin"
+    rm -f "${base_index}_pq_pivots.bin"
+    rm -f "${base_index}_disk.index.tags" 2>/dev/null || true
+  fi
+
   if [ -f "${base_index}_disk.index" ]; then
     echo "Base index already exists: ${base_index}" >&2
     echo "${base_index}"
     return
   fi
-  
+
   if [ -f "${INDEX_BASE}_disk.index" ]; then
     echo "Using existing full index as base: ${INDEX_BASE}" >&2
     echo "${INDEX_BASE}"
     return
   fi
-  
+
   # 需要构建基础索引
   echo "Building base index (${base_pct}% of data)..." >&2
 
@@ -374,8 +403,29 @@ run_exp1_clustering() {
 
   local exp_index=$(prepare_base_index ${BASE_RATIO})
 
-  # 生成实验1专用的GT文件（基于分割后的base数据集）
-  local exp1_gt=$(prepare_exp1_gt ${BASE_RATIO})
+  # 判断是否复用了run_system_comparison.sh的exp1索引
+  local base_pct
+  base_pct=$(python3 -c "print(int(round(${BASE_RATIO} * 100)))")
+  local exp1_index_base="${INDEX_BASE}_exp1_base${base_pct}"
+
+  local exp1_gt
+  if [ "${exp_index}" = "${exp1_index_base}" ]; then
+    # 复用了exp1索引，同时复用GT文件
+    local gt_ext="${GT_FILE##*.}"
+    local gt_prefix="${GT_FILE%.*}"
+    local exp1_gt_k=100
+    exp1_gt="${gt_prefix}_exp1_base${base_pct}_k${exp1_gt_k}.${gt_ext}"
+
+    if [ ! -f "${exp1_gt}" ]; then
+      echo "Error: GT file not found for exp1 index: ${exp1_gt}" >&2
+      echo "Please run run_system_comparison.sh first to generate it" >&2
+      exit 1
+    fi
+    echo "Reusing GT from run_system_comparison.sh: ${exp1_gt}" >&2
+  else
+    # 使用ablation专用索引，生成对应的GT文件
+    exp1_gt=$(prepare_exp1_gt ${BASE_RATIO})
+  fi
 
   ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${exp1_gt}" \
     "${INSERT_FILE}" 1 "${RESULTS_DIR}" \

@@ -335,6 +335,11 @@ void compare_search_latency(const std::string &index_prefix, const std::string &
 
   // 加载索引
   pipeann::SSDIndex<T, TagT> index(pipeann::L2, reader, nbr_handler, false);
+  
+  // DC-PDI优化控制：设置搜索模式，这样SSDIndex可以根据模式启用DC-PDI特有优化
+  // 必须在load之前设置，因为load可能会初始化与搜索模式相关的数据结构
+  index.set_search_mode(search_mode);
+  
   int load_result = index.load(index_prefix.c_str(), num_threads, true, use_page_search);
 
   if (load_result != 0) {

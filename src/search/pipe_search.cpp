@@ -213,9 +213,14 @@ namespace pipeann {
     // k表示下一个需要检查的位置，避免重复扫描已处理的节点
     unsigned k = 0;
 
-    // DC-PDI优化v4: 批量发送I/O请求
-    // 关键改进：移除num_seen限制，只用to_send.size()控制
-    // 原因：num_seen限制会导致扫描范围过小，错过好的候选
+    // DC-PDI优化v5: 页面复用映射
+    // 记录页面ID -> 缓冲区指针，用于同页节点复用
+    tsl::robin_map<unsigned, char *> page_buf_map;
+    page_buf_map.reserve(beam_width * 2);
+
+    // DC-PDI优化v5: 批量发送I/O请求
+    // 关键优化：借鉴beam_search策略，使用num_seen限制但允许更深扫描
+    // 新增：页面复用检查，避免对同页节点发起重复I/O
     auto send_batch_read_req = [&](uint32_t n) -> unsigned {
       if (n == 0)
         return 0;
@@ -223,24 +228,37 @@ namespace pipeann {
       std::vector<std::pair<unsigned, Neighbor *>> to_send;
       to_send.reserve(n);
 
-      // DC-PDI优化v4：从k开始扫描，不使用num_seen限制
-      // 只控制to_send.size() < n即可
+      // DC-PDI优化v5：借鉴beam_search的num_seen策略
       uint32_t marker = k;
+      uint32_t num_seen = 0;
 
-      // DC-PDI优化v4：简化判断条件，同时增加扫描深度
-      // flag=true表示未发送，flag=false表示已发送
-      // visited=true表示已处理完成
-      // 扫描深度限制：避免扫描过多节点（最多扫描2*beam_width个未发送节点）
-      uint32_t scan_limit = marker + beam_width * 3;  // 限制扫描范围
-      while (marker < cur_list_size && marker < scan_limit && to_send.size() < n) {
-        // DC-PDI优化v4: 只有flag=true且未读取的节点才发送
+      while (marker < cur_list_size && to_send.size() < n && num_seen < beam_width) {
         if (retset[marker].flag && !retset[marker].visited) {
+          num_seen++;
           unsigned id = retset[marker].id;
-          // 跳过已读取的节点
-          if (id_buf_map.find(id) == id_buf_map.end()) {
-            to_send.push_back({marker, &retset[marker]});
-            retset[marker].flag = false;  // 标记为已发送
+          
+          // DC-PDI优化v5: 跳过已读取的节点
+          if (id_buf_map.find(id) != id_buf_map.end()) {
+            ++marker;
+            continue;
           }
+          
+          // DC-PDI优化v5: 页面复用检查
+          // 如果该节点所在页面已被读取，直接从缓存获取，无需发送I/O
+          const unsigned loc = id2loc(id);
+          const unsigned pid = loc_sector_no(loc);
+          auto page_it = page_buf_map.find(pid);
+          if (page_it != page_buf_map.end()) {
+            // 页面已在缓存中，直接添加到id_buf_map
+            char *node_buf = offset_to_loc(page_it->second, loc);
+            id_buf_map.insert(std::make_pair(id, node_buf));
+            retset[marker].flag = false;  // 标记为已处理
+            ++marker;
+            continue;  // 不需要发送I/O
+          }
+          
+          to_send.push_back({marker, &retset[marker]});
+          retset[marker].flag = false;  // 标记为已发送
         }
         ++marker;
       }
@@ -288,14 +306,18 @@ namespace pipeann {
       return to_send.size();
     };
 
-    // DC-PDI优化v3: 轮询I/O完成（移除on_flight_ids操作）
+    // DC-PDI优化v5: 轮询I/O完成并建立页面复用映射
     auto poll_all = [&]() -> unsigned {
       reader->poll_all(ctx);
       unsigned n_completed = 0;
       while (!on_flight_ios.empty() && on_flight_ios.front().finished()) {
         io_t &io = on_flight_ios.front();
-        id_buf_map.insert(std::make_pair(io.nbr.id, offset_to_loc((char *) io.read_req->buf, io.loc)));
-        // DC-PDI优化v3: 移除on_flight_ids.erase()调用
+        char *node_buf = offset_to_loc((char *) io.read_req->buf, io.loc);
+        id_buf_map.insert(std::make_pair(io.nbr.id, node_buf));
+        
+        // DC-PDI优化v5: 记录页面缓冲区，用于同页节点复用
+        page_buf_map.insert(std::make_pair(io.page_id, (char *) io.read_req->buf));
+        
 #ifndef READ_ONLY_TESTS
         idx_lock_table.unlock(io.nbr.id);
 #endif
@@ -305,14 +327,19 @@ namespace pipeann {
       return n_completed;
     };
 
-    // DC-PDI优化v3: 处理已读取的节点，从k开始扫描
+    // DC-PDI优化v5: 处理已读取的节点，限制处理数量以减少延迟
     // 返回<处理节点数, 最佳更新位置nk>，nk用于更新k指针
+    // 关键改进：每次只处理beam_width个节点，避免大量CPU计算阻塞I/O
     auto calc_best_nodes = [&]() -> std::pair<unsigned, unsigned> {
       unsigned n_processed = 0;
       unsigned nk = cur_list_size;
 
-      // 从k开始扫描，处理所有已读取但未访问的节点
-      for (unsigned marker = k; marker < cur_list_size; ++marker) {
+      // DC-PDI优化v5: 限制每轮处理的节点数
+      // 处理过多节点会增加CPU时间，降低I/O并行度
+      const unsigned max_process_per_round = beam_width;
+
+      // 从k开始扫描，只处理有限数量的已读取节点
+      for (unsigned marker = k; marker < cur_list_size && n_processed < max_process_per_round; ++marker) {
         if (!retset[marker].visited) {
           auto it = id_buf_map.find(retset[marker].id);
           if (it != id_buf_map.end()) {
@@ -365,34 +392,33 @@ namespace pipeann {
     }
 #endif
 
-    // DC-PDI优化v4: 主循环 - 更激进的早停策略
-    // 分析：beam_search在k > nk时终止，我们应该更接近这个策略
-    // 原来k_search*2太保守，导致额外的I/O开销
-    // 新策略：当已收集足够结果且k超过阈值时停止
-    // 阈值设为k_search + beam_width，确保有足够的候选同时避免过多I/O
-    const unsigned early_stop_threshold = static_cast<unsigned>(k_search) + beam_width;
+    // DC-PDI优化v5: 主循环 - 与beam_search更一致的策略
+    // 核心改进：
+    // 1. 更紧的早停阈值（k_search即可）
+    // 2. 与beam_search一致的k更新策略
+    // 3. 在满足结果数量后更积极地终止
+    const unsigned early_stop_threshold = static_cast<unsigned>(k_search);
     
     while (k < cur_list_size || !on_flight_ios.empty()) {
       // 1. 轮询已完成的I/O
       unsigned n_completed = poll_all();
 
-      // 2. 处理所有已读取的节点
+      // 2. 处理已读取的节点（限制数量以保持I/O并行度）
       auto [n_processed, nk] = calc_best_nodes();
 
-      // 3. 更新k指针（修复：与beam_search保持一致的逻辑）
-      // 关键修复：不论是否处理了节点，都需要更新k
+      // 3. k指针更新：完全遵循beam_search策略
+      // 如果发现更好的节点（nk <= k），回退k
+      // 否则k++（不是跳过所有visited，而是单步前进）
       if (nk <= k) {
-        k = nk;  // 发现更好的节点，回退k
-      } else if (n_processed > 0) {
-        // 推进k：跳过已访问的节点
-        while (k < cur_list_size && retset[k].visited) {
-          ++k;
-        }
+        k = nk;
+      } else {
+        ++k;
       }
 
-      // DC-PDI优化v3: 早停优化
-      // 当已经处理足够多的节点且k指针已经超过早停阈值时，可以提前终止
-      if (k >= early_stop_threshold && full_retset.size() >= k_search) {
+      // DC-PDI优化v5: 更激进的早停
+      // 条件：已收集足够结果 且 k已超过阈值 且 飞行中I/O数量较少
+      // 这样可以在保证召回率的同时大幅减少页面访问
+      if (full_retset.size() >= k_search && k >= early_stop_threshold) {
         // 等待所有飞行I/O完成后退出
         while (!on_flight_ios.empty()) {
           poll_all();

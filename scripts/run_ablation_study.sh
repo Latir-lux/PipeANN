@@ -230,154 +230,181 @@ else
   INSERT_FILE=${DATA_FILE}
 fi
 
-# ============= 准备基础索引 =============
-prepare_base_index() {
-  local base_ratio=$1
+# ============= 准备实验1的数据分片（按比例拆分）复用run_system_comparison.sh生成的文件 =============
+# 默认强制重建exp1 GT，避免复用错误范围
+FORCE_REGEN_EXP1_GT=${FORCE_REGEN_EXP1_GT:-"1"}
+EXP1_GT_K=${EXP1_GT_K:-"100"}
+prepare_exp1_data() {
+  local data_file=$1
+  local data_type=$2
+  local base_ratio=$3
+  local update_ratio=${4:-"0.5"}
+
+  local data_ext="${data_file##*.}"
+  local data_prefix="${data_file%.*}"
+
   local base_pct
-  base_pct=$(python3 -c "print(int(round(${base_ratio} * 100)))")
+  base_pct=$(python3 - <<PY
+import math
+print(int(round(${base_ratio} * 100)))
+PY
+)
+  local update_pct
+  update_pct=$(python3 - <<PY
+import math
+print(int(round(${update_ratio} * 100)))
+PY
+)
 
-  # 构造base data文件路径（与prepare_exp1_gt保持一致）
-  local base_data="${DATA_FILE%.*}_exp1_base${base_pct}.bin"
+  local base_file="${data_prefix}_exp1_base${base_pct}.${data_ext}"
+  local update_file="${data_prefix}_exp1_update${update_pct}.${data_ext}"
 
-  # 构造run_system_comparison.sh生成的exp1索引路径（用于复用）
-  local exp1_index_base="${INDEX_BASE}_exp1_base${base_pct}"
-
-  # 优先检查并复用run_system_comparison.sh生成的exp1索引
-  if [ -f "${exp1_index_base}_disk.index" ]; then
-    # 验证相关文件都存在
-    if [ -f "${base_data}" ] && [ -f "${exp1_index_base}_pq_compressed.bin" ] && [ -f "${exp1_index_base}_pq_pivots.bin" ]; then
-      echo "Reusing exp1 index from run_system_comparison.sh: ${exp1_index_base}" >&2
-      echo "${exp1_index_base}"
-      return
-    else
-      echo "Warning: exp1 index exists but data files incomplete, will rebuild..." >&2
-    fi
+  # Exp1 GT文件路径（基于base ratio的数据集）
+  local gt_ext="${GT_FILE##*.}"
+  local gt_prefix="${GT_FILE%.*}"
+  local exp1_gt_k=${EXP1_GT_K}
+  if [ "${exp1_gt_k}" -lt 100 ]; then
+    exp1_gt_k=100
   fi
+  local exp1_gt_file="${gt_prefix}_exp1_base${base_pct}_k${exp1_gt_k}.${gt_ext}"
 
-  local base_index="${INDEX_BASE}_ablation_base${base_pct}"
-
-  # 如果索引存在，但base data文件不存在，说明索引是基于错误的数据集构建的
-  # 需要重新构建索引以确保与GT文件匹配
-  if [ -f "${base_index}_disk.index" ] && [ ! -f "${base_data}" ]; then
-    echo "Warning: Index exists but base data file missing: ${base_data}" >&2
-    echo "Removing stale index to rebuild with correct data..." >&2
-    rm -f "${base_index}_disk.index"
-    rm -f "${base_index}_pq_compressed.bin"
-    rm -f "${base_index}_pq_pivots.bin"
-    rm -f "${base_index}_disk.index.tags" 2>/dev/null || true
-  fi
-
-  if [ -f "${base_index}_disk.index" ]; then
-    echo "Base index already exists: ${base_index}" >&2
-    echo "${base_index}"
-    return
-  fi
-
-  if [ -f "${INDEX_BASE}_disk.index" ]; then
-    echo "Using existing full index as base: ${INDEX_BASE}" >&2
-    echo "${INDEX_BASE}"
-    return
-  fi
-
-  # 需要构建基础索引
-  echo "Building base index (${base_pct}% of data)..." >&2
-
-  # 分割数据（使用与run_system_comparison.sh一致的命名，便于复用GT文件）
-  local base_data="${DATA_FILE%.*}_exp1_base${base_pct}.bin"
-  if [ ! -f "${base_data}" ]; then
-    python3 - >&2 <<PY
-import sys
+  if [ -f "${base_file}" ] && [ -f "${update_file}" ]; then
+    echo "Using existing exp1 data splits: ${base_file}, ${update_file}" >&2
+    EXP1_BASE_FILE=${base_file}
+    EXP1_UPDATE_FILE=${update_file}
+  else
+    python3 - <<PY
+import os
 import struct
 
-data_file = "${DATA_FILE}"
-base_file = "${base_data}"
+data_file = "${data_file}"
+base_file = "${base_file}"
+update_file = "${update_file}"
 base_ratio = float("${base_ratio}")
-data_type = "${DATA_TYPE}"
+update_ratio = float("${update_ratio}")
+data_type = "${data_type}"
 
 dtype_size = {"uint8": 1, "int8": 1, "float": 4}.get(data_type)
 if dtype_size is None:
-    print(f"Unsupported data type: {data_type}", file=sys.stderr)
-    sys.exit(1)
+    raise SystemExit(f"Unsupported data type: {data_type}")
 
 with open(data_file, "rb") as f:
     header = f.read(8)
     if len(header) != 8:
-        print(f"Invalid data file header: {data_file}", file=sys.stderr)
-        sys.exit(1)
+        raise SystemExit(f"Invalid data file header: {data_file}")
     npts, dim = struct.unpack("<ii", header)
 
 base_pts = int(npts * base_ratio)
-if base_pts <= 0:
-    print(f"Invalid base_pts: {base_pts}", file=sys.stderr)
-    sys.exit(1)
+remaining = max(0, npts - base_pts)
+update_pts = int(remaining * update_ratio)
+if update_pts > remaining:
+    update_pts = remaining
 
-print(f"Splitting: {base_pts} / {npts} vectors", file=sys.stderr)
+if base_pts <= 0 or update_pts <= 0:
+    raise SystemExit(f"Invalid split sizes: base={base_pts}, update={update_pts}, total={npts}")
 
-with open(data_file, "rb") as src, open(base_file, "wb") as dst:
-    dst.write(struct.pack("<ii", base_pts, dim))
-    src.seek(8)
-    remaining_bytes = base_pts * dim * dtype_size
-    buf_size = 1024 * 1024
-    while remaining_bytes > 0:
-        to_read = min(buf_size, remaining_bytes)
-        chunk = src.read(to_read)
-        if not chunk:
-            print(f"Unexpected EOF while reading {data_file}", file=sys.stderr)
-            sys.exit(1)
-        dst.write(chunk)
-        remaining_bytes -= len(chunk)
+def write_split(out_path, start_pt, count):
+    with open(data_file, "rb") as src, open(out_path, "wb") as dst:
+        dst.write(struct.pack("<ii", count, dim))
+        src.seek(8 + start_pt * dim * dtype_size)
+        remaining_bytes = count * dim * dtype_size
+        buf_size = 1024 * 1024
+        while remaining_bytes > 0:
+            to_read = min(buf_size, remaining_bytes)
+            chunk = src.read(to_read)
+            if not chunk:
+                raise SystemExit(f"Unexpected EOF while reading {data_file}")
+            dst.write(chunk)
+            remaining_bytes -= len(chunk)
+
+if not os.path.exists(base_file):
+    write_split(base_file, 0, base_pts)
+if not os.path.exists(update_file):
+    write_split(update_file, base_pts, update_pts)
+
+print(base_file)
+print(update_file)
 PY
+    EXP1_BASE_FILE=${base_file}
+    EXP1_UPDATE_FILE=${update_file}
   fi
-  
-  # 构建索引（输出重定向到stderr，避免污染返回值）
-  mkdir -p $(dirname "${base_index}")
-  ./build/tests/build_disk_index ${DATA_TYPE} ${base_data} ${base_index} \
-    96 128 32 256 ${NUM_THREADS} l2 pq >&2
-  
-  echo "${base_index}"
-}
 
-# ============= 准备实验1专用Groundtruth =============
-# 为分割后的base数据集生成对应的GT文件，确保recall计算正确
-# 注意：GT文件命名与run_system_comparison.sh保持一致，实现跨脚本复用
-prepare_exp1_gt() {
-  local base_ratio=$1
+  # 获取基础/更新数据集点数，用于生成GT
+  local base_pts_count
+  base_pts_count=$(python3 - <<PY
+import struct
+with open("${EXP1_BASE_FILE}", "rb") as f:
+    npts, dim = struct.unpack("<ii", f.read(8))
+    print(npts)
+PY
+)
+  if [ "${base_pts_count}" -lt "${exp1_gt_k}" ]; then
+    echo "Error: base points (${base_pts_count}) less than required GT K (${exp1_gt_k})" >&2
+    exit 1
+  fi
 
-  local base_pct
-  base_pct=$(python3 -c "print(int(round(${base_ratio} * 100)))")
-
-  local gt_ext="${GT_FILE##*.}"
-  local gt_prefix="${GT_FILE%.*}"
-  local exp1_gt_k=100
-  local exp1_gt_file="${gt_prefix}_exp1_base${base_pct}_k${exp1_gt_k}.${gt_ext}"
+  if [ "${FORCE_REGEN_EXP1_GT}" = "1" ] && [ -f "${exp1_gt_file}" ]; then
+    echo "Removing existing exp1 GT to force regeneration: ${exp1_gt_file}" >&2
+    rm -f "${exp1_gt_file}"
+  fi
 
   if [ -f "${exp1_gt_file}" ]; then
     echo "Using existing exp1 GT: ${exp1_gt_file}" >&2
-    echo "${exp1_gt_file}"
-    return
+  else
+    echo "Generating exp1 GT for base ${base_pct}% (${base_pts_count} points), K=${exp1_gt_k}..." >&2
+    if [ ! -x "./build/tests/utils/compute_groundtruth" ]; then
+      echo "Error: ./build/tests/utils/compute_groundtruth not found or not executable" >&2
+      exit 1
+    fi
+    ./build/tests/utils/compute_groundtruth "${data_type}" "${EXP1_BASE_FILE}" "${QUERY_FILE}" "${exp1_gt_k}" "${exp1_gt_file}" >&2
+    if [ $? -ne 0 ]; then
+      echo "Error: Failed to generate exp1 GT" >&2
+      exit 1
+    fi
   fi
 
-  # 构造base数据文件路径（与prepare_base_index中的逻辑一致，使用exp1前缀）
-  local base_data="${DATA_FILE%.*}_exp1_base${base_pct}.bin"
-  if [ ! -f "${base_data}" ]; then
-    echo "Error: Base data file not found: ${base_data}" >&2
-    echo "Hint: Make sure prepare_base_index was called first to generate the base data file" >&2
+  EXP1_GT_FILE=${exp1_gt_file}
+  echo "Exp1 GT file: ${EXP1_GT_FILE}" >&2
+}
+
+# ============= 验证GT文件 =============
+# 使用gt_update工具验证GT文件是否包含足够的近邻
+validate_exp1_gt() {
+  local gt_file=$1
+  local base_pts=$2
+  local total_pts=$3
+  local target_topk=$4
+
+  echo "Validating GT file: ${gt_file}" >&2
+  echo "  Base points: ${base_pts}" >&2
+  echo "  Total points: ${total_pts}" >&2
+  echo "  Target top-K: ${target_topk}" >&2
+
+  if [ ! -x "./build/tests/gt_update" ]; then
+    echo "Error: ./build/tests/gt_update executable not found or not executable" >&2
+    echo "Please compile first: cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make gt_update" >&2
     exit 1
   fi
 
-  echo "Generating exp1 GT for base ${base_pct}% (${exp1_gt_k} nearest neighbors)..." >&2
-  if [ ! -x "./build/tests/utils/compute_groundtruth" ]; then
-    echo "Error: ./build/tests/utils/compute_groundtruth not found or not executable" >&2
+  if [ ! -f "${gt_file}" ]; then
+    echo "Error: GT file not found: ${gt_file}" >&2
     exit 1
   fi
 
-  ./build/tests/utils/compute_groundtruth "${DATA_TYPE}" "${base_data}" "${QUERY_FILE}" "${exp1_gt_k}" "${exp1_gt_file}" >&2
+  # 创建验证结果目录
+  local validate_dir="${RESULTS_DIR}/gt_validate"
+  mkdir -p "${validate_dir}"
+
+  echo "Running GT validation..." >&2
+  # gt_update <gt_file> <index_npts> <total_npts> <batch_npts> <target_topk> <target_dir> <insert_only>
+  # 使用batch_npts=1000做验证
+  ./build/tests/gt_update "${gt_file}" "${base_pts}" "${total_pts}" 1000 "${target_topk}" "${validate_dir}" 1 >&2
+  
   if [ $? -ne 0 ]; then
-    echo "Error: Failed to generate exp1 GT" >&2
-    exit 1
+    echo "Warning: GT validation encountered issues" >&2
+  else
+    echo "GT validation completed successfully" >&2
   fi
-
-  echo "${exp1_gt_file}"
 }
 
 # ============= 函数定义 =============
@@ -401,18 +428,13 @@ run_exp1_clustering() {
   echo "######################################"
   echo ""
 
-  # 直接复用run_system_comparison.sh生成的所有文件，不进行任何文件生成
-  # 使用与run_system_comparison.sh完全相同的文件命名格式
-  local exp1_base_tag
-  exp1_base_tag=$(printf "%s" "${BASE_RATIO}" | tr '.' 'p')
+  # 准备实验1的数据分片（从run_system_comparison.sh复用）
+  prepare_exp1_data ${DATA_FILE} ${DATA_TYPE} ${BASE_RATIO} 0.5
+  local base_pct
+  base_pct=$(python3 -c "print(int(round(${BASE_RATIO} * 100)))")
 
   # 使用run_system_comparison.sh的exp1索引路径
-  local exp_index="${INDEX_BASE}_exp1_base${exp1_base_tag}"
-
-  # 使用run_system_comparison.sh的GT文件路径
-  local gt_ext="${GT_FILE##*.}"
-  local gt_prefix="${GT_FILE%.*}"
-  local exp1_gt="${gt_prefix}_exp1_base${exp1_base_tag}_k100.${gt_ext}"
+  local exp_index="${INDEX_BASE}_exp1_base${base_pct}"
 
   # 验证所有必需文件存在
   if [ ! -f "${exp_index}_disk.index" ]; then
@@ -431,18 +453,39 @@ run_exp1_clustering() {
     exit 1
   fi
 
-  if [ ! -f "${exp1_gt}" ]; then
-    echo "Error: exp1 GT file not found: ${exp1_gt}" >&2
+  if [ ! -f "${EXP1_GT_FILE}" ]; then
+    echo "Error: exp1 GT file not found: ${EXP1_GT_FILE}" >&2
     echo "Please run run_system_comparison.sh first to generate it" >&2
     exit 1
   fi
 
   echo "Reusing files from run_system_comparison.sh:" >&2
   echo "  Index: ${exp_index}_disk.index" >&2
-  echo "  GT: ${exp1_gt}" >&2
+  echo "  GT: ${EXP1_GT_FILE}" >&2
   echo "  PQ: ${exp_index}_pq_compressed.bin" >&2
+  echo "  Base data: ${EXP1_BASE_FILE}" >&2
+  echo "  Update data: ${EXP1_UPDATE_FILE}" >&2
 
-  ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${exp1_gt}" \
+  # 验证GT文件
+  local base_pts_count
+  base_pts_count=$(python3 - <<PY
+import struct
+with open("${EXP1_BASE_FILE}", "rb") as f:
+    npts, dim = struct.unpack("<ii", f.read(8))
+    print(npts)
+PY
+)
+  local total_pts_count
+  total_pts_count=$(python3 - <<PY
+import struct
+with open("${DATA_FILE}", "rb") as f:
+    npts, dim = struct.unpack("<ii", f.read(8))
+    print(npts)
+PY
+)
+  validate_exp1_gt "${EXP1_GT_FILE}" "${base_pts_count}" "${total_pts_count}" 100
+
+  ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${EXP1_GT_FILE}" \
     "${INSERT_FILE}" 1 "${RESULTS_DIR}" \
     --num-threads ${NUM_THREADS} \
     --insert-count ${INSERT_COUNT} \

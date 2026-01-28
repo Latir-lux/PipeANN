@@ -442,10 +442,38 @@ run_exp2_reorganization() {
   echo "######################################"
   echo ""
   
-  local exp_index=$(prepare_base_index ${BASE_RATIO})
-  
-  ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${GT_FILE}" \
-    "${INSERT_FILE}" 2 "${RESULTS_DIR}" \
+  # 准备实验1的数据分片（从run_system_comparison.sh复用，与实验1保持一致）
+  prepare_exp1_data ${DATA_FILE} ${DATA_TYPE} ${BASE_RATIO} 0.5
+  local base_pct
+  base_pct=$(printf "%s" "${BASE_RATIO}" | tr '.' 'p')
+
+  # 复用实验1的索引
+  local exp_index="${INDEX_BASE}_exp1_base${base_pct}"
+
+  # 验证索引文件
+  if [ ! -f "${exp_index}_disk.index" ]; then
+    echo "Error: exp1 index not found: ${exp_index}_disk.index" >&2
+    echo "Please run run_system_comparison.sh first to generate it" >&2
+    exit 1
+  fi
+
+  if [ ! -f "${exp_index}_pq_compressed.bin" ]; then
+    echo "Error: exp1 PQ compressed file not found: ${exp_index}_pq_compressed.bin" >&2
+    exit 1
+  fi
+
+  if [ ! -f "${exp_index}_pq_pivots.bin" ]; then
+    echo "Error: exp1 PQ pivots file not found: ${exp_index}_pq_pivots.bin" >&2
+    exit 1
+  fi
+
+  echo "Reusing files from exp1 (consistency check):" >&2
+  echo "  Index: ${exp_index}_disk.index" >&2
+  echo "  Update data: ${EXP1_UPDATE_FILE}" >&2
+
+  # 使用 EXP1_UPDATE_FILE 作为插入数据
+  ./build/tests/ablation_study "${DATA_TYPE}" "${exp_index}" "${QUERY_FILE}" "${EXP1_GT_FILE}" \
+    "${EXP1_UPDATE_FILE}" 2 "${RESULTS_DIR}" \
     --num-threads ${NUM_THREADS} \
     --duration ${DURATION_SEC} \
     --insert-rate ${INSERT_RATE}

@@ -445,16 +445,34 @@ void run_reorganization_ablation_exp(const std::string &index_prefix,
       }
     };
 
-    // 重组织线程（仅在mode=1时启用）
+    // 重组织线程（仅在mode=1时启用，且基于状态触发）
     auto reorg_func = [&]() {
       while (!stop_test.load()) {
-        std::this_thread::sleep_for(std::chrono::seconds(10));
+        std::this_thread::sleep_for(std::chrono::seconds(1));
         
         if (mode == 1) {
-          // 触发重组织
-          reorg_count.fetch_add(1);
-          // 调用索引的重组织方法（如果实现了的话）
-          // dyn_index.trigger_reorganization();
+          // 检测索引状态：如果脏页（这里用删除集大小近似）超过阈值（10%），触发重组织
+          size_t dirty_size = 0;
+          {
+             std::shared_lock<std::shared_timed_mutex> lock(dyn_index.delete_lock);
+             dirty_size = dyn_index.deletion_sets[dyn_index.active_delete_set].size();
+          }
+          
+          size_t total_points = 0;
+          if (dyn_index._disk_index) {
+             total_points = dyn_index._disk_index->num_points;
+          }
+
+          // 阈值设为 10%
+          if (total_points > 0 && dirty_size > total_points * 0.1) {
+             if (!dyn_index.is_reorganizing()) {
+                 reorg_count.fetch_add(1);
+                 // 触发后台重组织
+                 dyn_index.request_merge_async(num_threads / 2);
+                 // 等待合并完成（或让其在后台运行，但这里简单起见我们稍微等待一下避免连续触发）
+                 // dyn_index.wait_merge(); 
+             }
+          }
         }
       }
     };
